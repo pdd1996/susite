@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zhansite.example/schemas/site-config-v1.schema.json",
+  "title": "ZhanSite SiteConfig",
+  "description": "SiteRevision.config 的 v1 结构契约。Phase 1 校验 Asset ID 语法；Phase 2 发布前由服务端验证站点归属、存在性和类型。`x-uniqueBy` 与 `x-referenceValues` 是本仓库 Ajv 校验器使用的扩展关键字，用于表达分类唯一性和引用关系；使用 Ajv 时须先调用 `registerSiteConfigJsonSchemaKeywords` 注册。",
+  "$comment": "字段映射见 ../migration-demo-to-v1.md；权威来源规则见 ../adr/ADR-0001-doc-authority.md。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["brand", "contact", "assets", "home", "products", "certifications", "about"],
+  "properties": {
+    "brand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "primaryColor", "logoAssetId"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" },
+        "primaryColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "logoAssetId": { "$ref": "#/$defs/assetId" }
+      }
+    },
+    "contact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phone", "address"],
+      "properties": {
+        "phone": { "type": "string", "minLength": 3, "maxLength": 30, "pattern": "\\S" },
+        "fax": { "type": "string", "minLength": 3, "maxLength": 30, "pattern": "\\S" },
+        "address": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "wechatQrAssetId": { "$ref": "#/$defs/assetId" },
+        "mapUrl": { "type": "string", "format": "uri", "maxLength": 2048 }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["certificates"],
+      "properties": {
+        "certificates": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "assetId", "order"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "assetId": { "$ref": "#/$defs/assetId" },
+              "order": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "pdfCatalogAssetId": { "$ref": "#/$defs/assetId" }
+      }
+    },
+    "home": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hero", "principles", "strengths", "featuredCategoryIds"],
+      "properties": {
+        "hero": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "summary"],
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+            "summary": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" }
+          }
+        },
+        "principles": { "$ref": "#/$defs/textList4" },
+        "strengths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/shortText" }
+        },
+        "featuredCategoryIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/id" },
+          "x-referenceValues": "products.categories[].id"
+        }
+      }
+    },
+    "products": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["categories"],
+      "properties": {
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "x-uniqueBy": ["id", "slug"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "slug", "name", "summary", "series"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 80 },
+              "name": { "$ref": "#/$defs/shortText" },
+              "summary": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+              "series": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["id", "name", "sellingPoint"],
+                  "properties": {
+                    "id": { "$ref": "#/$defs/id" },
+                    "name": { "$ref": "#/$defs/shortText" },
+                  "sellingPoint": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+                    "imageAssetId": { "$ref": "#/$defs/assetId" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "certifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groups"],
+      "properties": {
+        "groups": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "items"],
+            "properties": {
+              "name": { "$ref": "#/$defs/shortText" },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "assetId"],
+                  "properties": {
+                    "name": { "$ref": "#/$defs/shortText" },
+                    "assetId": { "$ref": "#/$defs/assetId" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "about": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["introduction", "principles", "industries"],
+      "properties": {
+        "introduction": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" },
+        "principles": { "$ref": "#/$defs/textList4" },
+        "industries": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "$ref": "#/$defs/shortText" }
+        },
+        "factoryImageAssetIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/assetId" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$" },
+    "assetId": { "type": "string", "pattern": "^asset_[A-Za-z0-9][A-Za-z0-9_-]{0,99}$" },
+    "shortText": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" },
+    "textList4": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/shortText" }
+    }
+  }
+}

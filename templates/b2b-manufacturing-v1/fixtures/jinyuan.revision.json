@@ -1,0 +1,49 @@
+{
+  "siteId": "jinyuan-20260524",
+  "revision": 1,
+  "schemaVersion": "1.0",
+  "config": {
+    "brand": {
+      "name": "杭州金源电器有限公司",
+      "primaryColor": "#C41E3A",
+      "logoAssetId": "asset_logo_01"
+    },
+    "contact": {
+      "phone": "0571-86817925",
+      "address": "杭州市莫干山路1418号"
+    },
+    "assets": { "certificates": [] },
+    "home": {
+      "hero": {
+        "title": "杭州金源电器有限公司",
+        "summary": "专注互感器研发制造"
+      },
+      "principles": ["以质量求生存"],
+      "strengths": ["国标生产"],
+      "featuredCategoryIds": ["lv-current"]
+    },
+    "products": {
+      "categories": [
+        {
+          "id": "lv-current",
+          "slug": "lv-current",
+          "name": "低压电流互感器",
+          "summary": "适用于低压配电与测量场景",
+          "series": [
+            {
+              "id": "lmk1-bh",
+              "name": "LMK1(BH)-0.66",
+              "sellingPoint": "开启式结构，免拆线安装"
+            }
+          ]
+        }
+      ]
+    },
+    "certifications": { "groups": [] },
+    "about": {
+      "introduction": "专业生产互感器产品。",
+      "principles": ["以质量求生存"],
+      "industries": ["电网"]
+    }
+  }
+}

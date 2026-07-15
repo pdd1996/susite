@@ -1,0 +1,25 @@
+{
+  "name": "zhansite",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.26.2",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "pnpm -r typecheck && pnpm -r test",
+    "dev:admin": "pnpm --filter @zhansite/admin dev",
+    "dev:api": "pnpm --filter @zhansite/api dev",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4",
+    "vitest": "^4.1.10"
+  }
+}

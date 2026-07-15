@@ -1,0 +1,12 @@
+---
+description: Require Spec lifecycle for ZhanSite cross-module changes
+alwaysApply: true
+---
+
+# 展站 Spec 治理
+
+- 修改产品范围、配置契约、数据库、API、模板或跨两个以上工作区前，先检查是否存在对应 `.doc/specs/active/<feature>/` 变更包。
+- 活跃变更包必须包含 `spec.md`、`plan.md`、`tasks.md`，并写清验收标准和需要回写的长期文档。
+- 完成实现和验证后，先同步 `docs/` 的稳定事实，再将变更包归档到 `.doc/specs/archive/`。
+- 纯文案、链接、格式修正或不改变行为的局部维护无需创建 Spec。
+- 长期文档的权威来源遵循 `docs/adr/ADR-0001-doc-authority.md`；完整生命周期遵循 `docs/adr/ADR-0002-spec-driven-document-governance.md`。

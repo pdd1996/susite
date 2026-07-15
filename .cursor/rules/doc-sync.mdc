@@ -1,0 +1,16 @@
+---
+description: Keep ZhanSite documentation sources synchronized
+globs: "{README.md,docs/**/*.md,docs/**/*.json}"
+alwaysApply: false
+---
+
+# 展站文档同步
+
+- 平台范围、API、数据模型和验收标准以 `docs/展站-产品需求文档(PRD).md` 为准；项目阶段以 `docs/展站计划.md` 为准。
+- 修改 `docs/schemas/site-config-v1.schema.json` 时，检查并同步 PRD 的 SiteConfig 章节和 `docs/migration-demo-to-v1.md`。
+- 修改金源的页面范围、素材状态或验收标准时，同步 `docs/jinyuan/README.md` 与金源 PRD。
+- 修改金源视觉或交互时，以设计规范为准，并同步 PRD 的品牌规范。
+- 未验证的素材、域名、部署和设计交付物必须标为“待确认”或“占位”，不得标为“已完成”。
+- 历史讨论文档必须明确不作为当前范围或验收依据。
+
+详细权威层级与冲突处理见 `docs/adr/ADR-0001-doc-authority.md`。
