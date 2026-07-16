@@ -69,6 +69,12 @@
 ## 6. MySQL 集成与质量验证
 
 - [x] 配置隔离的 `DATABASE_URL_TEST`、测试建库/清理及 migration 执行流程
+- [x] 新增可靠性 migration：租约 fencing token、Deployment→Artifact 复合外键、审计索引
+- [x] 同步 Drizzle schema 中的复合外键、CHECK 与领取索引
+- [x] 提供带版本/checksum journal 的 `db:migrate` 入口，并校验 MySQL 8.0.16+、utf8mb4 排序规则与 UTC
+- [x] 让 API、Worker 与迁移入口自动加载 Git 忽略的 `apps/api/.env`，且进程环境变量保持更高优先级
+- [x] 修复 Artifact 首次并发领取、Revision affectedRows、过期 Worker 条件写入
+- [x] 增加 MySQL 集成覆盖：跨站 Artifact 拒绝、首次并发领取、过期 token 写入拒绝、关键 DDL 结构断言
 - [x] 增加 AC-01～AC-03 回归测试：站点创建产生 revision 1 与审计、配置错误字段定位、并发保存冲突
 - [x] 增加 MySQL 集成测试：Asset 外键、站点归属、Revision 乐观锁冲突、审计记录和 Phase 2 查询
 - [x] 增加 API 测试：签名约束、完成复核、草稿预留 ID、跨站/类型不匹配、部署时未复核/未批准占位拒绝
@@ -81,6 +87,7 @@
 ## 7. 文档回写与归档
 
 - [x] 回写 README、展站计划、展站 PRD、数据库设计与开发指南
+- [x] 将 MySQL 物理表设计、本机从零建库、统一迁移入口与失败恢复步骤回写 `DATABASE.md` / `DEV_GUIDE.md`
 - [x] 新建并回写 `docs/guides/DEPLOYMENT.md`，明确真实部署尚未验收
 - [x] 新建并回写 `deploy/README.md`，明确真实部署尚未验收
 - [x] 回写金源 README 和金源 PRD 的素材状态与占位批准事实

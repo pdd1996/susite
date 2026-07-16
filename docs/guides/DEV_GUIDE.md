@@ -4,7 +4,7 @@
 
 - Node.js 20.19+（当前 Vite 版本的最低要求）
 - pnpm 10+
-- MySQL 8+（仅持久化 API 模式需要）
+- Oracle MySQL 8.0.16+（仅持久化 API 模式需要；数据库使用 `utf8mb4_0900_ai_ci`）
 
 ## 安装与验证
 
@@ -31,9 +31,12 @@ pnpm dev:admin
 
 ## MySQL 持久化模式
 
-1. 复制 `apps/api/.env.example` 的变量到本地环境；
-2. 建库后按顺序执行 `apps/api/drizzle/0000_phase1_baseline.sql`、`0001_add_site_foreign_keys.sql`、`0002_phase2_assets_and_preview.sql` 和 `0003_reliable_deployment_leases.sql`；
-3. 设置 `DATABASE_URL` 后启动 API。
+1. 按 [数据库设计与运维](DATABASE.md#本机从零建库) 创建 `zhansite` 与 `zhansite_test`；
+2. 将 `apps/api/.env.example` 复制为 Git 忽略的 `apps/api/.env`，填写 `DATABASE_URL`、`DATABASE_URL_TEST` 和 `DEV_ACTOR_ID`；
+3. 执行 `pnpm --filter @zhansite/api db:migrate`；
+4. 运行 API 测试后执行 `pnpm dev:api`。
+
+API、Worker 和迁移命令会自动读取 `apps/api/.env`，已有进程环境变量优先。密码包含 URL 保留字符时必须先 URL 编码。不要手工逐条执行 SQL；统一迁移器会记录 migration 文件名与 checksum，并拒绝已执行文件被改写。
 
 `DATABASE_URL` 未设置时只用于本地演示，进程退出后全部数据会丢失。
 
@@ -46,7 +49,7 @@ $env:DATABASE_URL_TEST="mysql://zhansite:password@localhost:3306/zhansite_test"
 pnpm --filter @zhansite/api test
 ```
 
-测试库名称必须包含 `test`，且会被测试清空。未设置 `DATABASE_URL_TEST` 时 MySQL 集成测试显示为 skipped，内存仓库、API 和后台交互测试仍会执行。
+测试库名称必须以 `_test` 结尾，且会被测试清空。未设置 `DATABASE_URL_TEST` 时 MySQL 集成测试显示为 skipped，内存仓库、API 和后台交互测试仍会执行。
 
 ## OSS 与 HTTPS 预览
 

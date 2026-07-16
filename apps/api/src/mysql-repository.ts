@@ -1,12 +1,11 @@
 import mysql from "mysql2/promise";
-import { and, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import type { SiteConfig } from "@zhansite/site-config";
 import { assets, auditLogs, buildArtifacts, deployments, siteRevisions, sites } from "./db-schema.js";
 import {
   SiteAlreadyExistsError,
   type Asset,
-  type AssetType,
   type AuditLog,
   type BuildArtifact,
   type Deployment,
@@ -15,17 +14,32 @@ import {
   type SiteRevision
 } from "./repository.js";
 
+const expectDatabaseValue = <T extends string>(
+  value: string,
+  allowed: readonly T[],
+  column: string
+): T => {
+  if (!allowed.includes(value as T)) {
+    throw new Error(`Unsupported database value for ${column}: ${value}`);
+  }
+  return value as T;
+};
+
 const asSite = (row: typeof sites.$inferSelect): Site => ({
   siteId: row.siteId,
   name: row.name,
-  template: "b2b-manufacturing-v1",
+  template: expectDatabaseValue(row.template, ["b2b-manufacturing-v1"] as const, "sites.template"),
   currentRevision: row.currentRevision
 });
 
 const asRevision = (row: typeof siteRevisions.$inferSelect): SiteRevision => ({
   siteId: row.siteId,
   revision: row.revision,
-  schemaVersion: "1.0",
+  schemaVersion: expectDatabaseValue(
+    row.schemaVersion,
+    ["1.0"] as const,
+    "site_revisions.schema_version"
+  ),
   config: row.config as SiteConfig,
   createdBy: row.createdBy,
   createdAt: row.createdAt.toISOString()
@@ -34,9 +48,17 @@ const asRevision = (row: typeof siteRevisions.$inferSelect): SiteRevision => ({
 const asAsset = (row: typeof assets.$inferSelect): Asset => ({
   assetId: row.assetId,
   siteId: row.siteId,
-  type: row.type as AssetType,
-  status: row.status as Asset["status"],
-  sourceKind: row.sourceKind as Asset["sourceKind"],
+  type: expectDatabaseValue(
+    row.type,
+    ["logo", "product_image", "certificate_image", "product_pdf", "wechat_qr", "factory_image"],
+    "assets.type"
+  ),
+  status: expectDatabaseValue(row.status, ["verified"] as const, "assets.status"),
+  sourceKind: expectDatabaseValue(
+    row.sourceKind,
+    ["customer_provided", "placeholder"] as const,
+    "assets.source_kind"
+  ),
   ...(row.placeholderApprovedBy ? { placeholderApprovedBy: row.placeholderApprovedBy } : {}),
   ...(row.placeholderApprovedAt ? { placeholderApprovedAt: row.placeholderApprovedAt.toISOString() } : {}),
   objectKey: row.objectKey,
@@ -55,12 +77,17 @@ const asArtifact = (row: typeof buildArtifacts.$inferSelect): BuildArtifact => (
   artifactId: row.artifactId,
   siteId: row.siteId,
   revision: row.revision,
-  template: "b2b-manufacturing-v1",
+  template: expectDatabaseValue(
+    row.template,
+    ["b2b-manufacturing-v1"] as const,
+    "build_artifacts.template"
+  ),
   templateVersion: row.templateVersion,
   inputChecksum: row.inputChecksum,
   location: row.location,
-  status: row.status as BuildArtifact["status"],
+  status: expectDatabaseValue(row.status, ["building", "ready"] as const, "build_artifacts.status"),
   ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt.toISOString() } : {}),
+  leaseToken: row.leaseToken,
   createdBy: row.createdBy,
   createdAt: row.createdAt.toISOString()
 });
@@ -71,26 +98,46 @@ const asDeployment = (row: typeof deployments.$inferSelect): Deployment => ({
   siteId: row.siteId,
   revision: row.revision,
   ...(row.artifactId ? { artifactId: row.artifactId } : {}),
-  environment: "preview",
+  environment: expectDatabaseValue(row.environment, ["preview"] as const, "deployments.environment"),
   idempotencyKey: row.idempotencyKey,
-  status: row.status as Deployment["status"],
+  status: expectDatabaseValue(
+    row.status,
+    ["queued", "building", "deploying", "healthy", "failed"] as const,
+    "deployments.status"
+  ),
   placeholderAssetIds: row.placeholderAssetIds,
   ...(row.previewUrl ? { previewUrl: row.previewUrl } : {}),
   ...(row.errorSummary ? { errorSummary: row.errorSummary } : {}),
   ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt.toISOString() } : {}),
+  leaseToken: row.leaseToken,
   createdBy: row.createdBy,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString()
 });
 
+const mysqlErrorCode = (error: unknown): string | undefined => {
+  let current = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== "object" || current === null) return undefined;
+    if ("code" in current && typeof current.code === "string") return current.code;
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return undefined;
+};
+
 export const isDuplicateEntryError = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  "code" in error &&
-  error.code === "ER_DUP_ENTRY";
+  mysqlErrorCode(error) === "ER_DUP_ENTRY";
+
+const isArtifactClaimRaceError = (error: unknown): boolean =>
+  isDuplicateEntryError(error) ||
+  mysqlErrorCode(error) === "ER_LOCK_DEADLOCK" ||
+  mysqlErrorCode(error) === "ER_LOCK_WAIT_TIMEOUT";
 
 export function createMySqlRepository(databaseUrl: string): SiteRepository {
-  const pool = mysql.createPool(databaseUrl);
+  const pool = mysql.createPool({ uri: databaseUrl, timezone: "Z" });
+  pool.on("connection", (connection) => {
+    void connection.query("SET time_zone = '+00:00'");
+  });
   const db = drizzle({ client: pool });
 
   return {
@@ -184,10 +231,13 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           config,
           createdBy: actorId
         });
-        await tx
+        const [updateResult] = await tx
           .update(sites)
           .set({ currentRevision: revision.revision })
           .where(and(eq(sites.siteId, siteId), eq(sites.currentRevision, expectedRevision)));
+        if (updateResult.affectedRows !== 1) {
+          throw new Error("revision_pointer_update_conflict");
+        }
         await tx.insert(auditLogs).values({
           actorId,
           action: "revision.created",
@@ -219,8 +269,21 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
         return asset;
       } catch (error) {
         if (!isDuplicateEntryError(error)) throw error;
-        const [existing] = await db.select().from(assets).where(eq(assets.assetId, asset.assetId));
-        if (!existing) throw error;
+        const [existing] = await db
+          .select()
+          .from(assets)
+          .where(
+            or(eq(assets.assetId, asset.assetId), eq(assets.objectKey, asset.objectKey))
+          );
+        if (
+          !existing ||
+          existing.siteId !== asset.siteId ||
+          existing.assetId !== asset.assetId ||
+          existing.objectKey !== asset.objectKey ||
+          existing.checksumSha256 !== asset.checksumSha256
+        ) {
+          throw error;
+        }
         return asAsset(existing);
       }
     },
@@ -237,52 +300,98 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
     },
 
     async claimArtifact(artifact, leaseExpiresAt) {
-      return db.transaction(async (tx) => {
-        const [existing] = await tx
-          .select()
-          .from(buildArtifacts)
-          .where(eq(buildArtifacts.artifactId, artifact.artifactId))
-          .for("update");
-        if (existing) {
-          const existingArtifact = asArtifact(existing);
-          if (
-            existingArtifact.status === "ready" ||
-            (existingArtifact.leaseExpiresAt &&
-              Date.parse(existingArtifact.leaseExpiresAt) > Date.now())
-          ) {
-            return { artifact: existingArtifact, claimed: false };
-          }
-          await tx
-            .update(buildArtifacts)
-            .set({ status: "building", leaseExpiresAt: new Date(leaseExpiresAt) })
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          return await db.transaction(async (tx) => {
+            const [existing] = await tx
+              .select()
+              .from(buildArtifacts)
+              .where(eq(buildArtifacts.artifactId, artifact.artifactId))
+              .for("update");
+            if (existing) {
+              const existingArtifact = asArtifact(existing);
+              if (
+                existingArtifact.status === "ready" ||
+                (existingArtifact.leaseExpiresAt &&
+                  Date.parse(existingArtifact.leaseExpiresAt) > Date.now())
+              ) {
+                return { artifact: existingArtifact, claimed: false };
+              }
+              const nextLeaseToken = existing.leaseToken + 1;
+              await tx
+                .update(buildArtifacts)
+                .set({
+                  status: "building",
+                  leaseExpiresAt: new Date(leaseExpiresAt),
+                  leaseToken: nextLeaseToken
+                })
+                .where(eq(buildArtifacts.artifactId, artifact.artifactId));
+              return {
+                artifact: {
+                  ...existingArtifact,
+                  status: "building",
+                  leaseExpiresAt,
+                  leaseToken: nextLeaseToken
+                },
+                claimed: true
+              };
+            }
+            const buildingArtifact = {
+              ...artifact,
+              status: "building" as const,
+              leaseExpiresAt,
+              leaseToken: 1
+            };
+            await tx.insert(buildArtifacts).values({
+              ...buildingArtifact,
+              leaseExpiresAt: new Date(leaseExpiresAt),
+              createdAt: new Date(artifact.createdAt)
+            });
+            await tx.insert(auditLogs).values({
+              actorId: artifact.createdBy,
+              action: "artifact.created",
+              siteId: artifact.siteId,
+              targetId: artifact.artifactId
+            });
+            return { artifact: buildingArtifact, claimed: true };
+          });
+        } catch (error) {
+          if (!isArtifactClaimRaceError(error)) throw error;
+          lastError = error;
+          const [existing] = await db
+            .select()
+            .from(buildArtifacts)
             .where(eq(buildArtifacts.artifactId, artifact.artifactId));
-          return {
-            artifact: { ...existingArtifact, status: "building", leaseExpiresAt },
-            claimed: true
-          };
+          if (existing) return { artifact: asArtifact(existing), claimed: false };
         }
-        const buildingArtifact = { ...artifact, status: "building" as const, leaseExpiresAt };
-        await tx.insert(buildArtifacts).values({
-          ...buildingArtifact,
-          leaseExpiresAt: new Date(leaseExpiresAt),
-          createdAt: new Date(artifact.createdAt)
-        });
-        await tx.insert(auditLogs).values({
-          actorId: artifact.createdBy,
-          action: "artifact.created",
-          siteId: artifact.siteId,
-          targetId: artifact.artifactId
-        });
-        return { artifact: buildingArtifact, claimed: true };
-      });
+      }
+      throw lastError;
     },
 
-    async markArtifactReady(artifactId) {
-      await db
+    async markArtifactReady(artifactId, leaseToken) {
+      const [updateResult] = await db
         .update(buildArtifacts)
         .set({ status: "ready", leaseExpiresAt: null })
-        .where(eq(buildArtifacts.artifactId, artifactId));
-      const [row] = await db.select().from(buildArtifacts).where(eq(buildArtifacts.artifactId, artifactId));
+        .where(
+          and(
+            eq(buildArtifacts.artifactId, artifactId),
+            eq(buildArtifacts.status, "building"),
+            eq(buildArtifacts.leaseToken, leaseToken),
+            sql`${buildArtifacts.leaseExpiresAt} > CURRENT_TIMESTAMP`
+          )
+        );
+      if (updateResult.affectedRows !== 1) return undefined;
+      const [row] = await db
+        .select()
+        .from(buildArtifacts)
+        .where(
+          and(
+            eq(buildArtifacts.artifactId, artifactId),
+            eq(buildArtifacts.status, "ready"),
+            eq(buildArtifacts.leaseToken, leaseToken)
+          )
+        );
       return row ? asArtifact(row) : undefined;
     },
 
@@ -296,6 +405,7 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
             previewUrl: deployment.previewUrl ?? null,
             errorSummary: deployment.errorSummary ?? null,
             leaseExpiresAt: leaseExpiresAt ? new Date(leaseExpiresAt) : null,
+            leaseToken: deployment.leaseToken ?? 0,
             createdAt: new Date(deployment.createdAt),
             updatedAt: new Date(deployment.updatedAt)
           });
@@ -350,21 +460,33 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           .limit(1)
           .for("update");
         if (!deployment) return undefined;
-        await tx
+        const nextLeaseToken = deployment.leaseToken + 1;
+        const [claimResult] = await tx
           .update(deployments)
-          .set({ status: "building", leaseExpiresAt: new Date(leaseExpiresAt) })
-          .where(eq(deployments.jobId, deployment.jobId));
+          .set({
+            status: "building",
+            leaseExpiresAt: new Date(leaseExpiresAt),
+            leaseToken: nextLeaseToken
+          })
+          .where(
+            and(
+              eq(deployments.jobId, deployment.jobId),
+              eq(deployments.leaseToken, deployment.leaseToken)
+            )
+          );
+        if (claimResult.affectedRows !== 1) return undefined;
         return asDeployment({
           ...deployment,
           status: "building",
-          leaseExpiresAt: new Date(leaseExpiresAt)
+          leaseExpiresAt: new Date(leaseExpiresAt),
+          leaseToken: nextLeaseToken
         });
       });
     },
 
-    async updateDeployment(siteId, jobId, patch) {
+    async updateDeployment(siteId, jobId, leaseToken, patch) {
       const { leaseExpiresAt, ...patchValues } = patch;
-      await db
+      const [updateResult] = await db
         .update(deployments)
         .set({
           ...patchValues,
@@ -375,11 +497,25 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
               : {}),
           updatedAt: new Date()
         })
-        .where(and(eq(deployments.siteId, siteId), eq(deployments.jobId, jobId)));
+        .where(
+          and(
+            eq(deployments.siteId, siteId),
+            eq(deployments.jobId, jobId),
+            eq(deployments.leaseToken, leaseToken),
+            sql`${deployments.leaseExpiresAt} > CURRENT_TIMESTAMP`
+          )
+        );
+      if (updateResult.affectedRows !== 1) return undefined;
       const [row] = await db
         .select()
         .from(deployments)
-        .where(and(eq(deployments.siteId, siteId), eq(deployments.jobId, jobId)));
+        .where(
+          and(
+            eq(deployments.siteId, siteId),
+            eq(deployments.jobId, jobId),
+            eq(deployments.leaseToken, leaseToken)
+          )
+        );
       return row ? asDeployment(row) : undefined;
     },
 

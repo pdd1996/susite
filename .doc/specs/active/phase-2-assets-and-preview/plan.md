@@ -40,6 +40,8 @@
 
 - `build_artifacts` 绑定 `site_id`、`revision`、`template`、`template_version`、构建输入 checksum、不可变 `location`、`status`、租约、`created_by` 与创建时间；同一构建输入先原子预留再构建，只有成功构建的 `ready` artifact 可复用。
 - `deployments` 绑定 `site_id`、`revision`、`artifact_id`、`environment=preview`、`job_id`、客户端幂等键、`status`、租约、`preview_url`、`error_summary` 和时间戳；同一站点和幂等键只能对应一个有效任务。Worker 原子领取 queued 或租约过期的任务。Phase 2 实现 `queued / building / deploying / healthy / failed` 及 HTTPS/路由/关键资源健康检查，Phase 3 再定义重试和回滚关联。
+- Artifact 与 Deployment 租约增加单调递增的 `lease_token`。Worker 领取或重领时 token 加一；完成构建、推进部署状态或写失败结果时必须携带领取到的 token，条件更新未命中即视为租约已丢失，旧 Worker 不得覆盖新 Worker。
+- `deployments` 通过复合外键保证其 `artifact_id + site_id + revision` 与 `build_artifacts` 一致；Drizzle schema 必须表达 SQL migration 中的复合外键、CHECK 和领取索引，避免双重真相。
 - 所有新写操作增加相应 `AuditLog` 动作，如 `asset.upload_signed`、`asset.verified`、`artifact.created`、`deployment.created`。
 
 上传对象键必须由服务端生成，例如 `uploads/{siteId}/{uploadId}/{random}`；已复核 Asset 使用 `assets/{siteId}/{assetId}/{sha256}`；artifact 使用 `artifacts/{siteId}/r{revision}/{templateVersion}/{artifactId}/`。禁止客户端指定 bucket、其他站点前缀或最终对象键。
@@ -47,6 +49,8 @@
 ### MySQL 测试环境
 
 为 API 提供显式的 `DATABASE_URL_TEST`（或同等隔离配置）与测试数据库创建/迁移脚本。每个集成测试在事务或清理后的独立 schema 中运行，绝不回退到开发 `DATABASE_URL`。测试先执行 Phase 1 与 Phase 2 migration，再断言 MySQL 的真实外键、唯一索引、事务锁和条件更新行为；内存仓库测试继续保留为快速单元测试。
+
+提供统一 `db:migrate` 入口：按文件名顺序执行 migration，并在数据库 journal 中记录文件名与 SHA-256；已应用 migration 的 checksum 不匹配时拒绝启动。MySQL 最低版本为 8.0.16，数据库使用 `utf8mb4_0900_ai_ci`，应用连接统一 UTC。
 
 ## API 与界面变化
 

@@ -7,6 +7,7 @@
     "build": "tsc --noEmit",
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/worker.ts",
+    "db:migrate": "tsx src/migrate.ts",
     "start:worker": "tsx src/worker.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
@@ -15,6 +16,7 @@
     "@hono/node-server": "^2.0.9",
     "@zhansite/site-config": "workspace:*",
     "ali-oss": "^6.23.0",
+    "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.30",
     "mysql2": "^3.23.0",
