@@ -10,9 +10,12 @@
 
 ```bash
 pnpm install
+pnpm acceptance:local
 pnpm check
 pnpm build
 ```
+
+`pnpm acceptance:local` 使用受控内存仓库、真实模板生产构建和仅绑定 loopback 的独立静态 HTTP 服务连续执行 20 次部署。它断言每轮实际构建、全部任务为 `healthy`、P95 不超过 10 分钟、占位 Asset 的真实校验和、5 个静态路由及关键 JS/Logo 可通过 HTTP 读取；验收过程不启动 API 网络监听器。报告中的本地 HTTP URL 仅验证静态产物，不代表公网 TLS 已配置。
 
 ## 本地运行
 
@@ -54,6 +57,8 @@ pnpm --filter @zhansite/api test
 ## OSS 与 HTTPS 预览
 
 真实预览所需变量见 `apps/api/.env.example`。OSS 配置必须完整，且启用 OSS 时 `UPLOAD_TOKEN_SECRET` 必须至少 32 个字符；部分配置或弱密钥会阻止 API 启动。只有 OSS 凭据、公开 Asset URL、`PLATFORM_DOMAIN`、泛域名 DNS、有效 HTTPS 证书及 CDN 路由全部就绪时，服务端才启用真实预览发布器；否则部署任务进入 `failed` 并记录 `preview_not_configured`。
+
+Phase 2 软件能力以 `pnpm acceptance:local` 退出；真实 OSS、公网 DNS/TLS/CDN、云端 P95 和公网微信真机属于部署基础设施启用门槛。未通过这些门槛时可以开发和回归，但不得把 Mock URL 用作客户预览链接。
 
 对象上传使用服务端生成的短时 PUT 签名。完成登记时服务端读取对象内容，校验实际 MIME/文件特征、大小并自行计算 SHA-256；PDF 还必须可解析且至少包含一页。通过后文件复制到不可变 Asset 路径；同一上传令牌重复完成时返回同一 Asset。
 

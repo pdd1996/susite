@@ -2,7 +2,7 @@
 
 ## 方案摘要
 
-保持 `SiteRevision` 为不可变内容快照，新增独立的 `Asset`、`BuildArtifact` 和 `Deployment` 生命周期。浏览器只通过服务端签发的短时 OSS 直传凭据上传到由 `siteId`、上传会话和随机对象名限定的临时前缀；服务端在完成回调中读取对象元数据、校验文件特征与 checksum，并将通过复核的对象提升或复制到不可变 Asset 路径后登记。
+保持 `SiteRevision` 为不可变内容快照，新增独立的 `Asset`、`BuildArtifact` 和 `Deployment` 生命周期。浏览器只通过服务端签发的短时上传信息写入由 `siteId`、上传会话和随机对象名限定的临时前缀；服务端在完成回调中读取对象元数据、校验文件特征与 checksum，并将通过复核的对象提升或复制到不可变 Asset 路径后登记。本阶段以受控本地/Mock 适配器作为软件能力退出证据，真实 OSS 与公网预览作为后续基础设施启用门槛。
 
 保存草稿 Revision 时，API 从配置中收集所有 Asset ID：尚不存在的预留 ID 可以保留，已存在的 Asset 必须属于当前 `siteId` 且与引用字段类型兼容。构建/预览前执行完整校验，要求全部引用存在、完成复核、归属同站、类型匹配且占位素材已批准。构建运行器以 `siteId/revision/templateVersion` 为输入构建，将静态包写入不可变 artifact 前缀；仅在平台预览基础设施条件满足且 HTTPS、关键路由及静态资源检查通过时返回预览 URL。部署和 artifact 均先由 Worker 原子领取并带有限期租约：启动后会扫描 queued 与过期任务，因此进程崩溃后的任务可恢复；artifact 在写入前已被预留，避免并发覆写同一路径。本地开发默认由 API 内嵌轮询器处理，受控预览环境使用独立 Worker 进程消费同一数据库队列。Phase 3 再补齐自动重试、原子切换、回滚和故障演练。
 
@@ -90,20 +90,20 @@ Revision 创建 API 保持既有 `expectedRevision` 乐观并发语义。响应 
 5. 运营人员选择 Revision 发起预览。API 再次校验 Asset，并创建 Deployment；Worker 按固定模板构建，写入不可变 artifact 路径。
 6. 部署适配器把对应 artifact 暴露为 `https://{siteId}.preview.{platformDomain}`，检查 HTTPS 首页、产品/资质/关于/联系路由及关键静态资源；全部通过后才标记为 `healthy` 并记录 URL。Phase 3 再承诺自动重试、原子回滚和故障演练。
 
-真实环境前置条件由部署配置显式提供并验证：平台域名、`*.preview.{platformDomain}` DNS、泛域名 HTTPS 证书、OSS/CDN 绑定和所在地合规状态。没有这些配置时只能运行本地/测试构建，部署接口必须返回可行动的配置错误。
+真实环境前置条件由部署配置显式提供并验证：平台域名、`*.preview.{platformDomain}` DNS、泛域名 HTTPS 证书、OSS/CDN 绑定和所在地合规状态。没有这些配置时只能运行本地/测试验收，真实发布接口必须返回可行动的配置错误。本地/Mock 通过只能证明契约、状态机、性能回归和静态独立性，不得改写为真实云交付证据。
 
 ## 风险与回滚
 
 - 真实素材可能涉及版权、商标、产品参数和二维码账号错误。采用清单、来源/批准记录及复核人责任字段；未确认时仅使用中性占位。
 - 直传若未限制对象键或 Content-Type，可能造成跨站写入或恶意文件。签名必须限制前缀、大小、类型和时间，完成端必须复核实际对象。
 - 仅依赖 MIME 可被伪造。对图片验证受控解码、对 PDF 验证魔数和可读取性；解析失败即拒绝。
-- 平台域名、证书、ICP 或 CDN 尚未就绪时无法声称完成 HTTPS 预览。将它们作为部署验收前置条件，并保留明确阻塞状态。
+- 平台域名、证书、ICP 或 CDN 尚未就绪时无法声称完成真实 HTTPS 预览。Phase 2 可按已批准的本地/Mock 口径归档，但部署指南必须保留明确阻塞状态，基础设施启用前不得对外交付。
 - 新表和外键 migration 存在升级风险。先在独立 MySQL 测试库演练，migration 仅追加；生产执行前备份并记录回滚脚本。已创建的 Asset/Artifact 不原地修改，错误对象以状态变更和延迟清理处理。
-- Phase 2 仅承诺首次预览的 HTTPS、路由与关键资源健康检查；自动重试、原子回滚和故障演练移交 Phase 3，避免把未验证行为宣传为可恢复发布。
+- Phase 2 仅承诺预览 URL 契约、路由与关键资源健康检查的软件能力；真实公网 HTTPS 属于基础设施启用门槛，自动重试、原子回滚和故障演练移交 Phase 3。
 
 ## 必须同步的长期文档
 
-- [x] `README.md`：更新当前阶段与 Phase 2 活跃 Spec 入口。
+- [x] `README.md`：更新当前阶段与 Phase 2 归档 Spec 入口。
 - [x] `docs/展站计划.md`：更新 Phase 2 进展、素材状态和预览基础设施的事实状态。
 - [x] `docs/展站-产品需求文档(PRD).md`：同步 Asset 规则、预览流程、接口/验收标准中的稳定结论。
 - [x] `docs/guides/DATABASE.md`：增加 Asset、BuildArtifact、Deployment 结构、约束、migration 运维与 MySQL 集成测试说明。
@@ -115,10 +115,10 @@ Revision 创建 API 保持既有 `expectedRevision` 乐观并发语义。响应 
 ## 实施顺序
 
 1. 建立并确认金源素材清单；收集真实文件或获得每个占位项的书面批准。
-2. 明确 OSS bucket、区域、对象键策略、服务端凭据、preview 域名、DNS、证书和合规前置条件；提供本地/测试替代适配器。
+2. 明确 OSS bucket、区域、对象键策略、服务端凭据、preview 域名、DNS、证书和合规前置条件；提供本地/测试替代适配器。真实基础设施未就绪时保持“阻塞/待确认”，不阻塞软件能力归档。
 3. 设计 Drizzle schema、追加 migration、仓库接口和 MySQL 集成测试基座。
 4. 实现 Asset 直传签名、完成复核、同站归属/类型语义校验及审计。
 5. 修正站点创建事务以生成 revision 1，并在 Revision 草稿保存与部署创建路径分别接入分级 Asset 校验；补齐 AC-01～AC-03 与 Asset API 测试。
 6. 实现后台素材、Revision 历史/冲突恢复和预览任务界面，并编写交互测试。
-7. 实现 Worker/构建 artifact/preview 部署适配器、幂等部署与健康检查，在受控测试环境验证 HTTPS URL、P95 与静态站独立性。
-8. 运行全量质量检查、MySQL 集成测试、构建及预览 smoke test；回写长期文档后归档 Spec。
+7. 实现 Worker/构建 artifact/preview 部署适配器、幂等部署与健康检查；通过 `pnpm acceptance:local` 连续 20 次真实模板构建，并用独立 loopback 静态 HTTP 服务验证 P95 与静态站独立性。
+8. 运行全量质量检查、MySQL 集成测试和构建；回写长期文档后归档 Spec。真实 OSS/HTTPS smoke、云端 P95 和公网微信真机移交基础设施启用验收。

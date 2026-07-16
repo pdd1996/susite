@@ -84,6 +84,7 @@ export class TemplatePreviewPublisher implements PreviewPublisher {
           SITE_ASSET_MAP_PATH: assetMapPath,
           BUILD_OUT_DIR: outputDirectory
         },
+        ...(process.platform === "win32" ? { shell: true } : {}),
         timeout: 5 * 60 * 1000
       });
 
