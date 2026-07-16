@@ -1,14 +1,26 @@
+import { randomUUID } from "node:crypto";
 import mysql from "mysql2/promise";
-import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import type { SiteConfig } from "@zhansite/site-config";
-import { assets, auditLogs, buildArtifacts, deployments, siteRevisions, sites } from "./db-schema.js";
+import {
+  assets,
+  auditLogs,
+  buildArtifacts,
+  deploymentEvents,
+  deployments,
+  sitePreviewStates,
+  siteRevisions,
+  sites
+} from "./db-schema.js";
 import {
   SiteAlreadyExistsError,
   type Asset,
   type AuditLog,
   type BuildArtifact,
   type Deployment,
+  type DeploymentEvent,
+  type SitePreviewState,
   type Site,
   type SiteRepository,
   type SiteRevision
@@ -98,21 +110,60 @@ const asDeployment = (row: typeof deployments.$inferSelect): Deployment => ({
   siteId: row.siteId,
   revision: row.revision,
   ...(row.artifactId ? { artifactId: row.artifactId } : {}),
+  ...(row.targetArtifactId ? { targetArtifactId: row.targetArtifactId } : {}),
+  kind: expectDatabaseValue(row.kind, ["publish", "rollback"] as const, "deployments.kind"),
   environment: expectDatabaseValue(row.environment, ["preview"] as const, "deployments.environment"),
   idempotencyKey: row.idempotencyKey,
   status: expectDatabaseValue(
     row.status,
-    ["queued", "building", "deploying", "healthy", "failed"] as const,
+    ["queued", "building", "deploying", "retry_waiting", "healthy", "failed"] as const,
     "deployments.status"
   ),
   placeholderAssetIds: row.placeholderAssetIds,
   ...(row.previewUrl ? { previewUrl: row.previewUrl } : {}),
   ...(row.errorSummary ? { errorSummary: row.errorSummary } : {}),
+  attemptCount: row.attemptCount,
+  maxAttempts: row.maxAttempts,
+  ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt.toISOString() } : {}),
+  ...(row.lastErrorCode ? { lastErrorCode: row.lastErrorCode } : {}),
+  ...(row.lastErrorClass
+    ? {
+        lastErrorClass: expectDatabaseValue(
+          row.lastErrorClass,
+          ["transient", "permanent", "concurrency"] as const,
+          "deployments.last_error_class"
+        )
+      }
+    : {}),
   ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt.toISOString() } : {}),
   leaseToken: row.leaseToken,
   createdBy: row.createdBy,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString()
+});
+
+const asPreviewState = (row: typeof sitePreviewStates.$inferSelect): SitePreviewState => ({
+  siteId: row.siteId,
+  environment: expectDatabaseValue(row.environment, ["preview"] as const, "site_preview_states.environment"),
+  activeArtifactId: row.activeArtifactId,
+  activeDeploymentId: row.activeDeploymentId,
+  previewUrl: row.previewUrl,
+  version: row.version,
+  activatedAt: row.activatedAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString()
+});
+
+const asDeploymentEvent = (row: typeof deploymentEvents.$inferSelect): DeploymentEvent => ({
+  eventId: row.eventId,
+  deploymentId: row.deploymentId,
+  siteId: row.siteId,
+  attempt: row.attempt,
+  sequence: row.sequence,
+  stage: row.stage,
+  level: expectDatabaseValue(row.level, ["info", "warn", "error"] as const, "deployment_events.level"),
+  code: row.code,
+  message: row.message,
+  createdAt: row.createdAt.toISOString()
 });
 
 const mysqlErrorCode = (error: unknown): string | undefined => {
@@ -395,15 +446,40 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
       return row ? asArtifact(row) : undefined;
     },
 
+    async getArtifact(siteId, artifactId) {
+      const [row] = await db
+        .select()
+        .from(buildArtifacts)
+        .where(and(eq(buildArtifacts.siteId, siteId), eq(buildArtifacts.artifactId, artifactId)));
+      return row ? asArtifact(row) : undefined;
+    },
+
+    async listReadyArtifacts(siteId) {
+      return (
+        await db
+          .select()
+          .from(buildArtifacts)
+          .where(and(eq(buildArtifacts.siteId, siteId), eq(buildArtifacts.status, "ready")))
+          .orderBy(desc(buildArtifacts.createdAt))
+      ).map(asArtifact);
+    },
+
     async createDeployment(deployment) {
       try {
         await db.transaction(async (tx) => {
-          const { leaseExpiresAt, ...deploymentValues } = deployment;
+          const { leaseExpiresAt, nextAttemptAt, ...deploymentValues } = deployment;
           await tx.insert(deployments).values({
             ...deploymentValues,
             artifactId: deployment.artifactId ?? null,
+            targetArtifactId: deployment.targetArtifactId ?? null,
+            kind: deployment.kind ?? "publish",
+            attemptCount: deployment.attemptCount ?? 0,
+            maxAttempts: deployment.maxAttempts ?? 3,
             previewUrl: deployment.previewUrl ?? null,
             errorSummary: deployment.errorSummary ?? null,
+            nextAttemptAt: nextAttemptAt ? new Date(nextAttemptAt) : null,
+            lastErrorCode: deployment.lastErrorCode ?? null,
+            lastErrorClass: deployment.lastErrorClass ?? null,
             leaseExpiresAt: leaseExpiresAt ? new Date(leaseExpiresAt) : null,
             leaseToken: deployment.leaseToken ?? 0,
             createdAt: new Date(deployment.createdAt),
@@ -425,6 +501,7 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           .where(
             and(
               eq(deployments.siteId, deployment.siteId),
+              eq(deployments.kind, deployment.kind ?? "publish"),
               eq(deployments.idempotencyKey, deployment.idempotencyKey)
             )
           );
@@ -441,6 +518,51 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
       return row ? asDeployment(row) : undefined;
     },
 
+    async failExpiredDeployments(now) {
+      return db.transaction(async (tx) => {
+        const expired = await tx
+          .select()
+          .from(deployments)
+          .where(
+            and(
+              inArray(deployments.status, ["building", "deploying"]),
+              lt(deployments.leaseExpiresAt, new Date(now)),
+              gte(deployments.attemptCount, deployments.maxAttempts)
+            )
+          )
+          .for("update");
+        if (expired.length === 0) return [];
+        await tx
+          .update(deployments)
+          .set({
+            status: "failed",
+            leaseExpiresAt: null,
+            errorSummary: "已达到最大重试次数",
+            lastErrorCode: "attempts_exhausted",
+            lastErrorClass: "transient",
+            updatedAt: new Date(now)
+          })
+          .where(
+            and(
+              inArray(deployments.status, ["building", "deploying"]),
+              lt(deployments.leaseExpiresAt, new Date(now)),
+              gte(deployments.attemptCount, deployments.maxAttempts)
+            )
+          );
+        return expired.map((deployment) =>
+          asDeployment({
+            ...deployment,
+            status: "failed",
+            leaseExpiresAt: null,
+            errorSummary: "已达到最大重试次数",
+            lastErrorCode: "attempts_exhausted",
+            lastErrorClass: "transient",
+            updatedAt: new Date(now)
+          })
+        );
+      });
+    },
+
     async claimNextDeployment(leaseExpiresAt) {
       return db.transaction(async (tx) => {
         const now = new Date();
@@ -451,8 +573,14 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
             or(
               eq(deployments.status, "queued"),
               and(
+                eq(deployments.status, "retry_waiting"),
+                or(isNull(deployments.nextAttemptAt), lt(deployments.nextAttemptAt, now)),
+                lt(deployments.attemptCount, deployments.maxAttempts)
+              ),
+              and(
                 inArray(deployments.status, ["building", "deploying"]),
-                or(isNull(deployments.leaseExpiresAt), lt(deployments.leaseExpiresAt, now))
+                or(isNull(deployments.leaseExpiresAt), lt(deployments.leaseExpiresAt, now)),
+                lt(deployments.attemptCount, deployments.maxAttempts)
               )
             )
           )
@@ -466,7 +594,9 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           .set({
             status: "building",
             leaseExpiresAt: new Date(leaseExpiresAt),
-            leaseToken: nextLeaseToken
+            leaseToken: nextLeaseToken,
+            attemptCount: deployment.attemptCount + 1,
+            nextAttemptAt: null
           })
           .where(
             and(
@@ -479,20 +609,38 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           ...deployment,
           status: "building",
           leaseExpiresAt: new Date(leaseExpiresAt),
-          leaseToken: nextLeaseToken
+          leaseToken: nextLeaseToken,
+          attemptCount: deployment.attemptCount + 1,
+          nextAttemptAt: null
         });
       });
     },
 
     async updateDeployment(siteId, jobId, leaseToken, patch) {
-      const { leaseExpiresAt, ...patchValues } = patch;
+      const {
+        leaseExpiresAt,
+        nextAttemptAt,
+        errorSummary,
+        lastErrorCode,
+        lastErrorClass,
+        ...patchValues
+      } = patch;
       const [updateResult] = await db
         .update(deployments)
         .set({
           ...patchValues,
+          ...("errorSummary" in patch ? { errorSummary: errorSummary ?? null } : {}),
+          ...("lastErrorCode" in patch ? { lastErrorCode: lastErrorCode ?? null } : {}),
+          ...("lastErrorClass" in patch ? { lastErrorClass: lastErrorClass ?? null } : {}),
+          ...(nextAttemptAt !== undefined
+            ? { nextAttemptAt: nextAttemptAt ? new Date(nextAttemptAt) : null }
+            : {}),
           ...(leaseExpiresAt
             ? { leaseExpiresAt: new Date(leaseExpiresAt) }
-            : patch.status === "healthy" || patch.status === "failed" || patch.status === "queued"
+            : patch.status === "healthy" ||
+                patch.status === "failed" ||
+                patch.status === "queued" ||
+                patch.status === "retry_waiting"
               ? { leaseExpiresAt: null }
               : {}),
           updatedAt: new Date()
@@ -517,6 +665,166 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           )
         );
       return row ? asDeployment(row) : undefined;
+    },
+
+    async getPreviewState(siteId) {
+      const [row] = await db
+        .select()
+        .from(sitePreviewStates)
+        .where(
+          and(eq(sitePreviewStates.siteId, siteId), eq(sitePreviewStates.environment, "preview"))
+        );
+      return row ? asPreviewState(row) : undefined;
+    },
+
+    async activatePreview(input) {
+      try {
+        return await db.transaction(async (tx) => {
+        const [deployment] = await tx
+          .select()
+          .from(deployments)
+          .where(
+            and(
+              eq(deployments.deploymentId, input.deploymentId),
+              eq(deployments.siteId, input.siteId)
+            )
+          )
+          .for("update");
+        if (
+          !deployment ||
+          deployment.leaseToken !== input.leaseToken ||
+          !deployment.leaseExpiresAt ||
+          deployment.leaseExpiresAt.getTime() <= Date.now()
+        ) return "lease_lost" as const;
+        const [artifact] = await tx
+          .select()
+          .from(buildArtifacts)
+          .where(
+            and(
+              eq(buildArtifacts.artifactId, input.artifactId),
+              eq(buildArtifacts.siteId, input.siteId),
+              eq(buildArtifacts.status, "ready")
+            )
+          );
+        if (!artifact) return "activation_conflict" as const;
+        const [current] = await tx
+          .select()
+          .from(sitePreviewStates)
+          .where(
+            and(
+              eq(sitePreviewStates.siteId, input.siteId),
+              eq(sitePreviewStates.environment, "preview")
+            )
+          )
+          .for("update");
+        if (
+          current?.activeDeploymentId === input.deploymentId &&
+          current.activeArtifactId === input.artifactId
+        ) return "already_activated" as const;
+        if ((current?.version ?? 0) !== input.expectedVersion) {
+          return "activation_conflict" as const;
+        }
+        if (!current) {
+          await tx.insert(sitePreviewStates).values({
+            siteId: input.siteId,
+            environment: "preview",
+            activeArtifactId: input.artifactId,
+            activeDeploymentId: input.deploymentId,
+            previewUrl: input.previewUrl,
+            version: 1,
+            activatedAt: new Date(input.activatedAt),
+            updatedAt: new Date(input.activatedAt)
+          });
+        } else {
+          const [result] = await tx
+            .update(sitePreviewStates)
+            .set({
+              activeArtifactId: input.artifactId,
+              activeDeploymentId: input.deploymentId,
+              previewUrl: input.previewUrl,
+              version: input.expectedVersion + 1,
+              activatedAt: new Date(input.activatedAt),
+              updatedAt: new Date(input.activatedAt)
+            })
+            .where(
+              and(
+                eq(sitePreviewStates.siteId, input.siteId),
+                eq(sitePreviewStates.environment, "preview"),
+                eq(sitePreviewStates.version, input.expectedVersion)
+              )
+            );
+          if (result.affectedRows !== 1) return "activation_conflict" as const;
+        }
+          return "activated" as const;
+        });
+      } catch (error) {
+        if (
+          isDuplicateEntryError(error) ||
+          mysqlErrorCode(error) === "ER_LOCK_DEADLOCK" ||
+          mysqlErrorCode(error) === "ER_LOCK_WAIT_TIMEOUT"
+        ) {
+          return "activation_conflict" as const;
+        }
+        throw error;
+      }
+    },
+
+    async appendDeploymentEvent(event) {
+      return db.transaction(async (tx) => {
+        const [deployment] = await tx
+          .select({ deploymentId: deployments.deploymentId })
+          .from(deployments)
+          .where(
+            and(
+              eq(deployments.deploymentId, event.deploymentId),
+              eq(deployments.siteId, event.siteId)
+            )
+          )
+          .for("update");
+        if (!deployment) throw new Error("deployment_not_found");
+        const rows = await tx
+          .select({ sequence: deploymentEvents.sequence })
+          .from(deploymentEvents)
+          .where(
+            and(
+              eq(deploymentEvents.deploymentId, event.deploymentId),
+              eq(deploymentEvents.attempt, event.attempt)
+            )
+          )
+          .orderBy(desc(deploymentEvents.sequence))
+          .limit(1);
+        const created = {
+          ...event,
+          eventId: `event_${randomUUID()}`,
+          sequence: (rows[0]?.sequence ?? 0) + 1,
+          createdAt: new Date().toISOString()
+        };
+        await tx.insert(deploymentEvents).values({
+          ...created,
+          createdAt: new Date(created.createdAt)
+        });
+        return created;
+      });
+    },
+
+    async listDeploymentEvents(siteId, jobId) {
+      const [deployment] = await db
+        .select({ deploymentId: deployments.deploymentId })
+        .from(deployments)
+        .where(and(eq(deployments.siteId, siteId), eq(deployments.jobId, jobId)));
+      if (!deployment) return undefined;
+      return (
+        await db
+          .select()
+          .from(deploymentEvents)
+          .where(
+            and(
+              eq(deploymentEvents.siteId, siteId),
+              eq(deploymentEvents.deploymentId, deployment.deploymentId)
+            )
+          )
+          .orderBy(asc(deploymentEvents.attempt), asc(deploymentEvents.sequence))
+      ).map(asDeploymentEvent);
     },
 
     async recordAudit(actorId, action, siteId, targetId) {

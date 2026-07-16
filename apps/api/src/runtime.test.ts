@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UnavailablePreviewPublisher } from "./deployment-service.js";
+import { TemplatePreviewPublisher, UnavailablePreviewPublisher } from "./deployment-service.js";
 import { InMemoryObjectStorage } from "./object-storage.js";
 import { InMemorySiteRepository } from "./repository.js";
 import { createRuntimeInfrastructure } from "./runtime.js";
@@ -18,5 +18,25 @@ describe("runtime infrastructure", () => {
     expect(() => createRuntimeInfrastructure({ OSS_REGION: "oss-cn-hangzhou" })).toThrow(
       "OSS configuration is incomplete"
     );
+  });
+
+  it("requires a candidate release health route before enabling real publishing", () => {
+    const cloudEnvironment = {
+      OSS_REGION: "oss-cn-hangzhou",
+      OSS_BUCKET: "preview-bucket",
+      OSS_ACCESS_KEY_ID: "key",
+      OSS_ACCESS_KEY_SECRET: "secret",
+      OSS_PUBLIC_BASE_URL: "https://assets.example.test",
+      PLATFORM_DOMAIN: "example.test"
+    };
+    expect(createRuntimeInfrastructure(cloudEnvironment).publisher).toBeInstanceOf(
+      UnavailablePreviewPublisher
+    );
+    expect(
+      createRuntimeInfrastructure({
+        ...cloudEnvironment,
+        PREVIEW_RELEASE_HEALTH_BASE_URL: "https://candidate.example.test"
+      }).publisher
+    ).toBeInstanceOf(TemplatePreviewPublisher);
   });
 });

@@ -9,10 +9,14 @@ async function main(): Promise<void> {
   }
 
   const { repository, publisher, hasOssConfig } = createRuntimeInfrastructure();
-  if (!hasOssConfig || !process.env.PLATFORM_DOMAIN) {
+  if (
+    !hasOssConfig ||
+    !process.env.PLATFORM_DOMAIN ||
+    !process.env.PREVIEW_RELEASE_HEALTH_BASE_URL
+  ) {
     await repository.close?.();
     throw new Error(
-      "The independent deployment worker requires complete OSS_* configuration and PLATFORM_DOMAIN."
+      "The independent deployment worker requires complete OSS_* configuration, PLATFORM_DOMAIN and PREVIEW_RELEASE_HEALTH_BASE_URL."
     );
   }
 

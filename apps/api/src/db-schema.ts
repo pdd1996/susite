@@ -122,6 +122,7 @@ export const buildArtifacts = mysqlTable(
       table.inputChecksum
     ),
     uniqueIndex("build_artifacts_identity_uq").on(table.artifactId, table.siteId, table.revision),
+    uniqueIndex("build_artifacts_site_identity_uq").on(table.artifactId, table.siteId),
     foreignKey({
       name: "build_artifacts_revision_fk",
       columns: [table.siteId, table.revision],
@@ -143,12 +144,19 @@ export const deployments = mysqlTable(
       .references(() => sites.siteId, { onDelete: "restrict", onUpdate: "cascade" }),
     revision: int("revision").notNull(),
     artifactId: varchar("artifact_id", { length: 110 }),
+    targetArtifactId: varchar("target_artifact_id", { length: 110 }),
+    kind: varchar("kind", { length: 20 }).notNull().default("publish"),
     environment: varchar("environment", { length: 20 }).notNull(),
     idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
     status: varchar("status", { length: 20 }).notNull(),
     placeholderAssetIds: json("placeholder_asset_ids").$type<string[]>().notNull(),
     previewUrl: varchar("preview_url", { length: 2048 }),
     errorSummary: text("error_summary"),
+    attemptCount: int("attempt_count", { unsigned: true }).notNull().default(0),
+    maxAttempts: int("max_attempts", { unsigned: true }).notNull().default(3),
+    nextAttemptAt: timestamp("next_attempt_at"),
+    lastErrorCode: varchar("last_error_code", { length: 80 }),
+    lastErrorClass: varchar("last_error_class", { length: 20 }),
     leaseExpiresAt: timestamp("lease_expires_at"),
     leaseToken: bigint("lease_token", { mode: "number", unsigned: true }).notNull().default(0),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
@@ -157,7 +165,12 @@ export const deployments = mysqlTable(
   },
   (table) => [
     uniqueIndex("deployments_job_id_uq").on(table.jobId),
-    uniqueIndex("deployments_site_idempotency_uq").on(table.siteId, table.idempotencyKey),
+    uniqueIndex("deployments_site_kind_idempotency_uq").on(
+      table.siteId,
+      table.kind,
+      table.idempotencyKey
+    ),
+    uniqueIndex("deployments_identity_uq").on(table.deploymentId, table.siteId),
     index("deployments_site_created_idx").on(table.siteId, table.createdAt),
     index("deployments_claim_idx").on(table.status, table.leaseExpiresAt, table.createdAt),
     foreignKey({
@@ -168,6 +181,14 @@ export const deployments = mysqlTable(
       .onUpdate("cascade")
       .onDelete("restrict"),
     foreignKey({
+      name: "deployments_target_artifact_identity_fk",
+      columns: [table.targetArtifactId, table.siteId, table.revision],
+      foreignColumns: [buildArtifacts.artifactId, buildArtifacts.siteId, buildArtifacts.revision]
+    })
+      .onUpdate("cascade")
+      .onDelete("restrict"),
+    check("deployments_kind_ck", sql`${table.kind} IN ('publish', 'rollback')`),
+    foreignKey({
       name: "deployments_artifact_identity_fk",
       columns: [table.artifactId, table.siteId, table.revision],
       foreignColumns: [buildArtifacts.artifactId, buildArtifacts.siteId, buildArtifacts.revision]
@@ -177,7 +198,71 @@ export const deployments = mysqlTable(
     check("deployments_environment_ck", sql`${table.environment} = 'preview'`),
     check(
       "deployments_status_ck",
-      sql`${table.status} IN ('queued', 'building', 'deploying', 'healthy', 'failed')`
+      sql`${table.status} IN ('queued', 'building', 'deploying', 'retry_waiting', 'healthy', 'failed')`
+    ),
+    check("deployments_attempts_ck", sql`${table.attemptCount} <= ${table.maxAttempts}`),
+    check(
+      "deployments_error_class_ck",
+      sql`${table.lastErrorClass} IS NULL OR ${table.lastErrorClass} IN ('transient', 'permanent', 'concurrency')`
     )
+  ]
+);
+
+export const sitePreviewStates = mysqlTable(
+  "site_preview_states",
+  {
+    siteId: varchar("site_id", { length: 80 }).notNull(),
+    environment: varchar("environment", { length: 20 }).notNull().default("preview"),
+    activeArtifactId: varchar("active_artifact_id", { length: 110 }).notNull(),
+    activeDeploymentId: varchar("active_deployment_id", { length: 110 }).notNull(),
+    previewUrl: varchar("preview_url", { length: 2048 }).notNull(),
+    version: bigint("version", { mode: "number", unsigned: true }).notNull().default(1),
+    activatedAt: timestamp("activated_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow()
+  },
+  (table) => [
+    uniqueIndex("site_preview_states_identity_uq").on(table.siteId, table.environment),
+    foreignKey({
+      name: "site_preview_states_site_fk",
+      columns: [table.siteId],
+      foreignColumns: [sites.siteId]
+    }).onUpdate("cascade").onDelete("restrict"),
+    foreignKey({
+      name: "site_preview_states_artifact_fk",
+      columns: [table.activeArtifactId, table.siteId],
+      foreignColumns: [buildArtifacts.artifactId, buildArtifacts.siteId]
+    }).onUpdate("cascade").onDelete("restrict"),
+    foreignKey({
+      name: "site_preview_states_deployment_fk",
+      columns: [table.activeDeploymentId, table.siteId],
+      foreignColumns: [deployments.deploymentId, deployments.siteId]
+    }).onUpdate("cascade").onDelete("restrict"),
+    check("site_preview_states_environment_ck", sql`${table.environment} = 'preview'`)
+  ]
+);
+
+export const deploymentEvents = mysqlTable(
+  "deployment_events",
+  {
+    eventId: varchar("event_id", { length: 140 }).primaryKey(),
+    deploymentId: varchar("deployment_id", { length: 110 }).notNull(),
+    siteId: varchar("site_id", { length: 80 }).notNull(),
+    attempt: int("attempt", { unsigned: true }).notNull(),
+    sequence: int("sequence", { unsigned: true }).notNull(),
+    stage: varchar("stage", { length: 80 }).notNull(),
+    level: varchar("level", { length: 20 }).notNull(),
+    code: varchar("code", { length: 80 }).notNull(),
+    message: varchar("message", { length: 500 }).notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow()
+  },
+  (table) => [
+    uniqueIndex("deployment_events_order_uq").on(table.deploymentId, table.attempt, table.sequence),
+    index("deployment_events_site_created_idx").on(table.siteId, table.createdAt),
+    foreignKey({
+      name: "deployment_events_deployment_fk",
+      columns: [table.deploymentId, table.siteId],
+      foreignColumns: [deployments.deploymentId, deployments.siteId]
+    }).onUpdate("cascade").onDelete("restrict"),
+    check("deployment_events_level_ck", sql`${table.level} IN ('info', 'warn', 'error')`)
   ]
 );

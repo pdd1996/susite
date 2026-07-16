@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "acceptance:local": "tsx src/local-acceptance.ts",
+    "acceptance:reliability": "vitest run src/reliability.test.ts src/mysql.integration.test.ts",
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/worker.ts",
     "db:migrate": "tsx src/migrate.ts",

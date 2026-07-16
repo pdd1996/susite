@@ -1,8 +1,8 @@
-# 展站 MySQL 8 数据库设计与运维（Phase 2）
+# 展站 MySQL 8 数据库设计与运维（Phase 3）
 
 ## 范围
 
-Phase 2 持久化站点身份、不可变配置版本、已复核素材、不可变构建产物、预览部署任务和审计记录。本文同时规定 MySQL 物理结构、本机从零建库、迁移与验收契约。部署重试、回滚与完整日志仍属于 Phase 3。
+Phase 3 在既有不可变配置、素材和构建产物上增加原子预览指针、部署重试调度、阶段事件和回滚任务。本文同时规定 MySQL 物理结构、本机从零建库、迁移与验收契约。
 
 ## MySQL 运行契约
 
@@ -22,6 +22,7 @@ Phase 2 持久化站点身份、不可变配置版本、已复核素材、不可
 - Phase 2 migration：`apps/api/drizzle/0002_phase2_assets_and_preview.sql`
 - 可靠任务 migration：`apps/api/drizzle/0003_reliable_deployment_leases.sql`
 - 数据库可靠性 migration：`apps/api/drizzle/0004_database_reliability.sql`
+- Phase 3 可靠性 migration：`apps/api/drizzle/0005_phase3_local_reliability.sql`
 - 统一迁移器：`apps/api/src/migrations.ts`、`apps/api/src/migrate.ts`
 - 配置字段契约：[SiteConfig v1 Schema](../schemas/site-config-v1.schema.json)
 
@@ -67,9 +68,13 @@ erDiagram
     sites ||--o{ assets : owns
     sites ||--o{ build_artifacts : builds
     sites ||--o{ deployments : deploys
+    sites ||--o{ site_preview_states : activates
     site_revisions ||--o{ build_artifacts : produces
     site_revisions ||--o{ deployments : requests
     build_artifacts ||--o{ deployments : published_as
+    build_artifacts ||--o{ site_preview_states : active
+    deployments ||--o{ deployment_events : records
+    deployments ||--o{ site_preview_states : activated_by
 
     sites {
         varchar site_id PK
@@ -116,10 +121,35 @@ erDiagram
         varchar site_id FK
         int revision FK
         varchar artifact_id FK
+        varchar target_artifact_id FK
+        varchar kind
         varchar idempotency_key
         varchar status
+        int attempt_count
+        int max_attempts
+        timestamp next_attempt_at
+        varchar last_error_code
+        varchar last_error_class
         json placeholder_asset_ids
         bigint lease_token
+    }
+    site_preview_states {
+        varchar site_id
+        varchar environment
+        varchar active_artifact_id FK
+        varchar active_deployment_id FK
+        bigint version
+        varchar preview_url
+    }
+    deployment_events {
+        varchar event_id PK
+        varchar deployment_id FK
+        varchar site_id
+        int attempt
+        int sequence
+        varchar stage
+        varchar code
+        varchar message
     }
 ```
 
@@ -169,13 +199,28 @@ erDiagram
 ### `deployments`
 
 - `deployment_id`：主键；`job_id`：全局唯一任务查询键。
-- `(site_id, idempotency_key)` 唯一，提供站点级请求幂等。
+- `(site_id, kind, idempotency_key)` 唯一，分别提供发布和回滚请求幂等。
 - `(site_id, revision)` 外键引用 SiteRevision。
 - `(artifact_id, site_id, revision)` 复合外键保证产物属于同一站点和 Revision；排队阶段 `artifact_id` 可为空。
-- `environment` 仅允许 `preview`；`status` 仅允许 `queued / building / deploying / healthy / failed`。
+- `kind` 仅允许 `publish / rollback`；回滚任务通过 `target_artifact_id` 绑定同站点 ready artifact。
+- `environment` 仅允许 `preview`；`status` 仅允许 `queued / building / deploying / retry_waiting / healthy / failed`。
+- `attempt_count`、`max_attempts`、`next_attempt_at` 实现最多 3 次有界退避；错误保存稳定 code 和 `transient / permanent / concurrency` 分类。
 - `placeholder_asset_ids json` 保存创建任务时引用的占位素材快照。
 - `lease_expires_at` 与 `lease_token` 共同实现可恢复且可 fencing 的 Worker 领取。
 - `(status, lease_expires_at, created_at)` 用于任务领取；`(site_id, created_at)` 用于站点任务列表。
+
+### `site_preview_states`
+
+- `(site_id, environment)` 唯一，Phase 3 仅允许 `preview`。
+- 保存当前健康 `active_artifact_id`、来源 `active_deployment_id`、稳定 preview URL 和激活时间。
+- `version` 是乐观并发版本；激活事务同时校验 `expected_version` 和 Deployment `lease_token`，过期 Worker 或旧版本返回冲突。
+- artifact、Deployment 均通过带 `site_id` 的复合外键约束归属，失败路径不删除或清空已有指针。
+
+### `deployment_events`
+
+- 事件只追加，`(deployment_id, attempt, sequence)` 唯一并提供稳定顺序。
+- 保存 stage、level、稳定 code、清洗后的 message 和时间；不保存凭据、签名 URL 或原始堆栈。
+- `(deployment_id, site_id)` 复合外键阻止跨站日志关联。
 
 所有业务外键使用 `ON UPDATE CASCADE ON DELETE RESTRICT`。Phase 2 不提供站点物理删除；需要下线或数据保留策略时应先设计软删除/归档流程。
 
@@ -190,18 +235,18 @@ erDiagram
 - `assets` 只保存完成服务端复核后的不可变记录；`asset_id` 全局唯一，`object_key` 唯一并通过外键归属站点。
 - `source_kind` 仅允许 `customer_provided` 或 `placeholder`；真实素材不得填写占位批准字段，未经批准的占位素材不能部署。
 - `build_artifacts` 通过 `(site_id, revision)` 引用不可变 Revision；相同 revision、模板版本与输入 checksum 只产生一个记录。构建开始前先原子预留记录并取得租约；每次领取令 `lease_token + 1`，只有携带当前 token 的 Worker 能将状态改为 `ready`。
-- `deployments` 的 `(site_id, idempotency_key)` 唯一；状态限于 `queued / building / deploying / healthy / failed`，并保存该 Revision 实际引用的已批准占位 Asset ID。领取或重领任务时 `lease_token + 1`；后续状态写入以 `(job_id, lease_token)` 为条件，防止过期 Worker 覆盖新结果。
+- `deployments` 的 `(site_id, kind, idempotency_key)` 唯一；领取或重领任务时 `lease_token + 1`、`attempt_count + 1`，只有到期 `retry_waiting` 或租约过期任务可重领。
 - Deployment 绑定 Artifact 时使用 `(artifact_id, site_id, revision)` 复合外键，数据库拒绝跨站点或跨 Revision 的产物关联。
 - 上传签名、Asset 复核、artifact 创建和 Deployment 创建分别写入审计；同一上传令牌重复完成时仓库返回已有 Asset，不创建重复记录。完成复核无论成功或失败都会删除临时上传对象；OSS bucket 还必须配置 `uploads/` 前缀的生命周期清理，作为 API 中断时的兜底。
 - API 写入前使用与 JSON Schema 对齐的 Zod 运行时契约；数据库 JSON 字段不替代业务校验。
 
 ## MySQL 集成测试
 
-设置独立的 `DATABASE_URL_TEST` 后运行 `pnpm --filter @zhansite/api test`。数据库名必须以 `_test` 结尾；测试会清空其中的 Phase 2 表和 migration journal，通过统一迁移器执行全部 migration，并验证 revision 1、乐观锁、Asset 外键、Deployment 幂等/查询、跨站 Artifact 拒绝、审计、多 Worker 并发领取、fencing token、Artifact 首次并发预留和关键 DDL 结构。未设置变量时该集成测试明确跳过，不会回退使用开发数据库。
+设置独立的 `DATABASE_URL_TEST` 后运行 `pnpm acceptance:reliability`。数据库名必须以 `_test` 结尾；测试会清空业务表和 migration journal，执行全部 migration，并验证复合外键、并发原子激活、版本冲突、过期 lease fencing、事件顺序和跨站约束。未设置变量时 MySQL 用例明确跳过，不会回退使用开发数据库。
 
 ## Migration 运维与回滚
 
-Phase 2 migration 采用追加式执行。生产或受控预览环境升级前必须备份数据库，并先在结构一致的独立测试库执行 `pnpm --filter @zhansite/api db:migrate`。执行后核对 `_zhansite_migrations`、外键、唯一索引、`lease_token` 和 `lease_expires_at`，再启动 API 和 Worker。
+Migration 采用追加式执行。生产或受控预览环境升级前必须备份数据库，并先在结构一致的独立测试库执行 `pnpm --filter @zhansite/api db:migrate`。执行后核对 `_zhansite_migrations`、Phase 3 两张新表、外键、唯一索引、`lease_token` 和重试字段，再启动 API 和 Worker。
 
 如果数据库已经人工执行过 `0000`～`0003`、但尚无 `_zhansite_migrations`，先备份并确认六张业务表与 `0003` 租约列齐全，再且仅再执行一次：
 
@@ -215,4 +260,4 @@ pnpm --filter @zhansite/api db:migrate --baseline-existing
 
 ## 后续扩展
 
-Phase 3 再增加部署日志、重试关联、回滚记录和失败保护所需的指针模型。
+真实云发布、CDN 对 active pointer 的路由适配和生产环境 promote 属于后续基础设施/Phase 4，不能用本地可靠性结果替代。

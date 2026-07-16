@@ -62,24 +62,63 @@ export type BuildArtifact = {
   createdAt: string;
 };
 
-export type DeploymentStatus = "queued" | "building" | "deploying" | "healthy" | "failed";
+export type DeploymentStatus =
+  | "queued"
+  | "building"
+  | "deploying"
+  | "retry_waiting"
+  | "healthy"
+  | "failed";
+export type DeploymentKind = "publish" | "rollback";
+export type DeploymentErrorClass = "transient" | "permanent" | "concurrency";
 export type Deployment = {
   deploymentId: string;
   jobId: string;
   siteId: string;
   revision: number;
   artifactId?: string;
+  targetArtifactId?: string;
+  kind?: DeploymentKind;
   environment: "preview";
   idempotencyKey: string;
   status: DeploymentStatus;
   placeholderAssetIds: string[];
   previewUrl?: string;
   errorSummary?: string;
+  attemptCount?: number;
+  maxAttempts?: number;
+  nextAttemptAt?: string;
+  lastErrorCode?: string;
+  lastErrorClass?: DeploymentErrorClass;
   leaseExpiresAt?: string;
   leaseToken?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SitePreviewState = {
+  siteId: string;
+  environment: "preview";
+  activeArtifactId: string;
+  activeDeploymentId: string;
+  previewUrl: string;
+  version: number;
+  activatedAt: string;
+  updatedAt: string;
+};
+
+export type DeploymentEvent = {
+  eventId: string;
+  deploymentId: string;
+  siteId: string;
+  attempt: number;
+  sequence: number;
+  stage: string;
+  level: "info" | "warn" | "error";
+  code: string;
+  message: string;
+  createdAt: string;
 };
 
 export type AuditLog = {
@@ -114,17 +153,44 @@ export type SiteRepository = {
     leaseExpiresAt: string
   ): Promise<{ artifact: BuildArtifact; claimed: boolean }>;
   markArtifactReady(artifactId: string, leaseToken: number): Promise<BuildArtifact | undefined>;
+  getArtifact(siteId: string, artifactId: string): Promise<BuildArtifact | undefined>;
+  listReadyArtifacts(siteId: string): Promise<BuildArtifact[]>;
   createDeployment(deployment: Deployment): Promise<{ deployment: Deployment; created: boolean }>;
   getDeployment(siteId: string, jobId: string): Promise<Deployment | undefined>;
+  failExpiredDeployments(now: string): Promise<Deployment[]>;
   claimNextDeployment(leaseExpiresAt: string): Promise<Deployment | undefined>;
   updateDeployment(
     siteId: string,
     jobId: string,
     leaseToken: number,
     patch: Partial<
-      Pick<Deployment, "artifactId" | "status" | "previewUrl" | "errorSummary" | "leaseExpiresAt">
+      Pick<
+        Deployment,
+        | "artifactId"
+        | "status"
+        | "previewUrl"
+        | "errorSummary"
+        | "leaseExpiresAt"
+        | "nextAttemptAt"
+        | "lastErrorCode"
+        | "lastErrorClass"
+      >
     >
   ): Promise<Deployment | undefined>;
+  getPreviewState(siteId: string): Promise<SitePreviewState | undefined>;
+  activatePreview(input: {
+    siteId: string;
+    deploymentId: string;
+    artifactId: string;
+    leaseToken: number;
+    expectedVersion: number;
+    previewUrl: string;
+    activatedAt: string;
+  }): Promise<"activated" | "already_activated" | "activation_conflict" | "lease_lost">;
+  appendDeploymentEvent(
+    event: Omit<DeploymentEvent, "eventId" | "sequence" | "createdAt">
+  ): Promise<DeploymentEvent>;
+  listDeploymentEvents(siteId: string, jobId: string): Promise<DeploymentEvent[] | undefined>;
   recordAudit(actorId: string, action: string, siteId: string, targetId: string): Promise<void>;
   getAuditLogs(siteId: string): Promise<AuditLog[]>;
   close?(): Promise<void>;
@@ -143,7 +209,11 @@ export class InMemorySiteRepository implements SiteRepository {
   private readonly assets = new Map<string, Asset>();
   private readonly artifacts = new Map<string, BuildArtifact>();
   private readonly deployments = new Map<string, Deployment>();
+  private readonly previewStates = new Map<string, SitePreviewState>();
+  private readonly deploymentEvents = new Map<string, DeploymentEvent[]>();
   private readonly audits: AuditLog[] = [];
+
+  constructor(private readonly now: () => number = Date.now) {}
 
   async createSite(
     site: Omit<Site, "currentRevision">,
@@ -242,7 +312,7 @@ export class InMemorySiteRepository implements SiteRepository {
   ): Promise<{ artifact: BuildArtifact; claimed: boolean }> {
     const existing = this.artifacts.get(artifact.artifactId);
     if (existing?.status === "ready") return { artifact: existing, claimed: false };
-    if (existing?.leaseExpiresAt && Date.parse(existing.leaseExpiresAt) > Date.now()) {
+    if (existing?.leaseExpiresAt && Date.parse(existing.leaseExpiresAt) > this.now()) {
       return { artifact: existing, claimed: false };
     }
     const claimed = {
@@ -263,7 +333,7 @@ export class InMemorySiteRepository implements SiteRepository {
       artifact.status !== "building" ||
       artifact.leaseToken !== leaseToken ||
       !artifact.leaseExpiresAt ||
-      Date.parse(artifact.leaseExpiresAt) <= Date.now()
+      Date.parse(artifact.leaseExpiresAt) <= this.now()
     ) {
       return undefined;
     }
@@ -272,14 +342,34 @@ export class InMemorySiteRepository implements SiteRepository {
     return ready;
   }
 
+  async getArtifact(siteId: string, artifactId: string): Promise<BuildArtifact | undefined> {
+    const artifact = this.artifacts.get(artifactId);
+    return artifact?.siteId === siteId ? artifact : undefined;
+  }
+
+  async listReadyArtifacts(siteId: string): Promise<BuildArtifact[]> {
+    return [...this.artifacts.values()]
+      .filter((artifact) => artifact.siteId === siteId && artifact.status === "ready")
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
   async createDeployment(deployment: Deployment): Promise<{ deployment: Deployment; created: boolean }> {
     const existing = [...this.deployments.values()].find(
-      (item) => item.siteId === deployment.siteId && item.idempotencyKey === deployment.idempotencyKey
+      (item) =>
+        item.siteId === deployment.siteId &&
+        item.kind === deployment.kind &&
+        item.idempotencyKey === deployment.idempotencyKey
     );
     if (existing) return { deployment: existing, created: false };
-    this.deployments.set(deployment.jobId, deployment);
+    const normalized = {
+      ...deployment,
+      kind: deployment.kind ?? "publish",
+      attemptCount: deployment.attemptCount ?? 0,
+      maxAttempts: deployment.maxAttempts ?? 3
+    };
+    this.deployments.set(deployment.jobId, normalized);
     this.audit(deployment.createdBy, "deployment.created", deployment.siteId, deployment.deploymentId);
-    return { deployment, created: true };
+    return { deployment: normalized, created: true };
   }
 
   async getDeployment(siteId: string, jobId: string): Promise<Deployment | undefined> {
@@ -287,13 +377,42 @@ export class InMemorySiteRepository implements SiteRepository {
     return deployment?.siteId === siteId ? deployment : undefined;
   }
 
+  async failExpiredDeployments(now: string): Promise<Deployment[]> {
+    const nowMs = Date.parse(now);
+    const failed: Deployment[] = [];
+    for (const deployment of this.deployments.values()) {
+      if (
+        !["building", "deploying"].includes(deployment.status) ||
+        !deployment.leaseExpiresAt ||
+        Date.parse(deployment.leaseExpiresAt) > nowMs ||
+        (deployment.attemptCount ?? 0) < (deployment.maxAttempts ?? 3)
+      ) continue;
+      const updated: Deployment = {
+        ...deployment,
+        status: "failed",
+        leaseExpiresAt: undefined,
+        errorSummary: "已达到最大重试次数",
+        lastErrorCode: "attempts_exhausted",
+        lastErrorClass: "transient",
+        updatedAt: new Date(this.now()).toISOString()
+      };
+      this.deployments.set(updated.jobId, updated);
+      failed.push(updated);
+    }
+    return failed;
+  }
+
   async claimNextDeployment(leaseExpiresAt: string): Promise<Deployment | undefined> {
-    const now = Date.now();
+    const now = this.now();
     const deployment = [...this.deployments.values()].find(
       (item) =>
         item.status === "queued" ||
+        (item.status === "retry_waiting" &&
+          (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now) &&
+          (item.attemptCount ?? 0) < (item.maxAttempts ?? 3)) ||
         ((item.status === "building" || item.status === "deploying") &&
-          (!item.leaseExpiresAt || Date.parse(item.leaseExpiresAt) <= now))
+          (!item.leaseExpiresAt || Date.parse(item.leaseExpiresAt) <= now) &&
+          (item.attemptCount ?? 0) < (item.maxAttempts ?? 3))
     );
     if (!deployment) return undefined;
     const claimed = {
@@ -301,6 +420,8 @@ export class InMemorySiteRepository implements SiteRepository {
       status: "building" as const,
       leaseExpiresAt,
       leaseToken: (deployment.leaseToken ?? 0) + 1,
+      attemptCount: (deployment.attemptCount ?? 0) + 1,
+      nextAttemptAt: undefined,
       updatedAt: new Date().toISOString()
     };
     this.deployments.set(claimed.jobId, claimed);
@@ -312,7 +433,17 @@ export class InMemorySiteRepository implements SiteRepository {
     jobId: string,
     leaseToken: number,
     patch: Partial<
-      Pick<Deployment, "artifactId" | "status" | "previewUrl" | "errorSummary" | "leaseExpiresAt">
+      Pick<
+        Deployment,
+        | "artifactId"
+        | "status"
+        | "previewUrl"
+        | "errorSummary"
+        | "leaseExpiresAt"
+        | "nextAttemptAt"
+        | "lastErrorCode"
+        | "lastErrorClass"
+      >
     >
   ): Promise<Deployment | undefined> {
     const current = await this.getDeployment(siteId, jobId);
@@ -320,13 +451,88 @@ export class InMemorySiteRepository implements SiteRepository {
       !current ||
       current.leaseToken !== leaseToken ||
       !current.leaseExpiresAt ||
-      Date.parse(current.leaseExpiresAt) <= Date.now()
+      Date.parse(current.leaseExpiresAt) <= this.now()
     ) {
       return undefined;
     }
-    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    const updated = {
+      ...current,
+      ...patch,
+      ...(["healthy", "failed", "retry_waiting"].includes(patch.status ?? "")
+        ? { leaseExpiresAt: undefined }
+        : {}),
+      updatedAt: new Date().toISOString()
+    };
     this.deployments.set(jobId, updated);
     return updated;
+  }
+
+  async getPreviewState(siteId: string): Promise<SitePreviewState | undefined> {
+    return this.previewStates.get(siteId);
+  }
+
+  async activatePreview(input: {
+    siteId: string;
+    deploymentId: string;
+    artifactId: string;
+    leaseToken: number;
+    expectedVersion: number;
+    previewUrl: string;
+    activatedAt: string;
+  }): Promise<"activated" | "already_activated" | "activation_conflict" | "lease_lost"> {
+    const deployment = [...this.deployments.values()].find(
+      (item) => item.deploymentId === input.deploymentId && item.siteId === input.siteId
+    );
+    const artifact = this.artifacts.get(input.artifactId);
+    if (
+      !deployment ||
+      deployment.leaseToken !== input.leaseToken ||
+      !deployment.leaseExpiresAt ||
+      Date.parse(deployment.leaseExpiresAt) <= this.now()
+    ) return "lease_lost";
+    if (!artifact || artifact.siteId !== input.siteId || artifact.status !== "ready") {
+      return "activation_conflict";
+    }
+    const current = this.previewStates.get(input.siteId);
+    if (
+      current?.activeDeploymentId === input.deploymentId &&
+      current.activeArtifactId === input.artifactId
+    ) return "already_activated";
+    if ((current?.version ?? 0) !== input.expectedVersion) return "activation_conflict";
+    this.previewStates.set(input.siteId, {
+      siteId: input.siteId,
+      environment: "preview",
+      activeArtifactId: input.artifactId,
+      activeDeploymentId: input.deploymentId,
+      previewUrl: input.previewUrl,
+      version: input.expectedVersion + 1,
+      activatedAt: input.activatedAt,
+      updatedAt: input.activatedAt
+    });
+    return "activated";
+  }
+
+  async appendDeploymentEvent(
+    event: Omit<DeploymentEvent, "eventId" | "sequence" | "createdAt">
+  ): Promise<DeploymentEvent> {
+    const events = this.deploymentEvents.get(event.deploymentId) ?? [];
+    const created: DeploymentEvent = {
+      ...event,
+      eventId: `${event.deploymentId}:${event.attempt}:${events.length + 1}`,
+      sequence: events.filter((item) => item.attempt === event.attempt).length + 1,
+      createdAt: new Date().toISOString()
+    };
+    events.push(created);
+    this.deploymentEvents.set(event.deploymentId, events);
+    return created;
+  }
+
+  async listDeploymentEvents(siteId: string, jobId: string): Promise<DeploymentEvent[] | undefined> {
+    const deployment = await this.getDeployment(siteId, jobId);
+    if (!deployment) return undefined;
+    return [...(this.deploymentEvents.get(deployment.deploymentId) ?? [])].sort(
+      (left, right) => left.attempt - right.attempt || left.sequence - right.sequence
+    );
   }
 
   async getAuditLogs(siteId: string): Promise<AuditLog[]> {

@@ -224,13 +224,94 @@ export function createApp(repository: SiteRepository, options: AppOptions) {
   });
 
   app.get("/sites/:siteId/deployments/:jobId", async (context) => {
+    const siteId = context.req.param("siteId");
     const deployment = await repository.getDeployment(
-      context.req.param("siteId"),
+      siteId,
       context.req.param("jobId")
     );
-    return deployment
-      ? context.json(deployment)
-      : context.json({ error: "deployment_not_found" }, 404);
+    if (!deployment) {
+      if (await repository.getSite(siteId)) {
+        await repository.recordAudit(
+          options.actorId,
+          "security.scope_denied",
+          siteId,
+          "deployment"
+        );
+      }
+      return context.json({ error: "deployment_not_found" }, 404);
+    }
+    const previewState = await repository.getPreviewState(siteId);
+    return context.json({
+      ...deployment,
+      servingPreviousHealthyVersion:
+        deployment.status !== "healthy" &&
+        Boolean(previewState && previewState.activeDeploymentId !== deployment.deploymentId)
+    });
+  });
+
+  app.get("/sites/:siteId/preview-state", async (context) => {
+    const siteId = context.req.param("siteId");
+    if (!(await repository.getSite(siteId))) return context.json({ error: "site_not_found" }, 404);
+    const state = await repository.getPreviewState(siteId);
+    if (!state) return context.json({ error: "preview_state_not_found" }, 404);
+    const artifact = await repository.getArtifact(siteId, state.activeArtifactId);
+    return context.json({ ...state, ...(artifact ? { revision: artifact.revision } : {}) });
+  });
+
+  app.get("/sites/:siteId/artifacts", async (context) => {
+    const siteId = context.req.param("siteId");
+    if (!(await repository.getSite(siteId))) return context.json({ error: "site_not_found" }, 404);
+    return context.json(
+      (await repository.listReadyArtifacts(siteId)).map(
+        ({ artifactId, revision, templateVersion, createdAt }) => ({
+          artifactId,
+          revision,
+          templateVersion,
+          createdAt
+        })
+      )
+    );
+  });
+
+  app.get("/sites/:siteId/deployments/:jobId/events", async (context) => {
+    const siteId = context.req.param("siteId");
+    const events = await repository.listDeploymentEvents(siteId, context.req.param("jobId"));
+    if (!events) {
+      if (await repository.getSite(siteId)) {
+        await repository.recordAudit(options.actorId, "security.scope_denied", siteId, "deployment_events");
+      }
+      return context.json({ error: "deployment_not_found" }, 404);
+    }
+    return context.json(events);
+  });
+
+  const rollbackSchema = z.strictObject({
+    artifactId: z.string().trim().min(1).max(110),
+    idempotencyKey: z.string().trim().min(1).max(120)
+  });
+  app.post("/sites/:siteId/rollbacks", async (context) => {
+    const siteId = context.req.param("siteId");
+    const parsed = rollbackSchema.safeParse(await context.req.json());
+    if (!parsed.success) {
+      return context.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+    }
+    try {
+      const result = await deploymentService.createRollback(
+        siteId,
+        parsed.data.artifactId,
+        parsed.data.idempotencyKey,
+        options.actorId
+      );
+      return context.json(result.deployment, result.created ? 202 : 200);
+    } catch (error) {
+      if (error instanceof DeploymentValidationError) {
+        if (await repository.getSite(siteId)) {
+          await repository.recordAudit(options.actorId, "security.scope_denied", siteId, "rollback");
+        }
+        return context.json({ error: "artifact_not_found" }, 404);
+      }
+      throw error;
+    }
   });
 
   app.put("/local-uploads/:token", async (context) => {

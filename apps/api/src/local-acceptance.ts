@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import {
-  copyFile,
+  access,
   cp,
   mkdir,
   mkdtemp,
@@ -62,6 +62,7 @@ const config: SiteConfig = {
 class LocalStaticPublisher implements PreviewPublisher {
   buildCount = 0;
   private readonly artifactDirectories = new Map<string, string>();
+  private readonly releaseDirectories = new Map<string, string>();
 
   constructor(
     private readonly artifactRoot: string,
@@ -104,6 +105,46 @@ class LocalStaticPublisher implements PreviewPublisher {
     }
   }
 
+  async prepareRelease(input: {
+    artifactPrefix: string;
+    releasePrefix: string;
+    siteId: string;
+  }): Promise<void> {
+    const artifactDirectory = this.artifactDirectories.get(input.artifactPrefix);
+    if (!artifactDirectory) throw new Error("local_artifact_missing");
+    const releaseDirectory = join(
+      this.staticRoot,
+      "releases",
+      createHash("sha256").update(input.releasePrefix).digest("hex")
+    );
+    await cp(artifactDirectory, releaseDirectory, { recursive: true, force: true });
+    this.releaseDirectories.set(input.releasePrefix, releaseDirectory);
+  }
+
+  async verifyRelease(
+    releasePrefix: string,
+    publishedSiteId: string,
+    assetUrls: Record<string, string> = {}
+  ): Promise<string> {
+    const candidateId = createHash("sha256").update(releasePrefix).digest("hex");
+    await verifyStaticPreview(
+      `${this.baseUrl}/__candidate/${candidateId}`,
+      Object.values(assetUrls),
+      `__candidate/${candidateId}`
+    );
+    return `${this.baseUrl}/${publishedSiteId}`;
+  }
+
+  getReleaseDirectory(releasePrefix: string): string | undefined {
+    return this.releaseDirectories.get(releasePrefix);
+  }
+
+  getCandidateDirectory(candidateId: string): string | undefined {
+    return [...this.releaseDirectories.entries()].find(
+      ([releasePrefix]) => createHash("sha256").update(releasePrefix).digest("hex") === candidateId
+    )?.[1];
+  }
+
   async publish(
     artifactPrefix: string,
     publishedSiteId: string,
@@ -112,23 +153,9 @@ class LocalStaticPublisher implements PreviewPublisher {
     const artifactDirectory = this.artifactDirectories.get(artifactPrefix);
     if (!artifactDirectory) throw new Error("local_artifact_missing");
 
-    const siteDirectory = join(this.staticRoot, publishedSiteId);
-    await rm(siteDirectory, { recursive: true, force: true });
-    await cp(artifactDirectory, siteDirectory, { recursive: true });
-    const indexPath = join(siteDirectory, "index.html");
-    for (const route of ["products", "certifications", "about", "contact"]) {
-      const routeDirectory = join(siteDirectory, route);
-      await mkdir(routeDirectory, { recursive: true });
-      await copyFile(indexPath, join(routeDirectory, "index.html"));
-    }
-    await cp(join(siteDirectory, "assets"), join(this.staticRoot, "assets"), {
-      recursive: true,
-      force: true
-    });
-
-    const previewUrl = `${this.baseUrl}/${publishedSiteId}`;
-    await verifyStaticPreview(previewUrl, Object.values(assetUrls));
-    return previewUrl;
+    const releasePrefix = `legacy/${publishedSiteId}/${createHash("sha256").update(artifactPrefix).digest("hex")}`;
+    await this.prepareRelease({ artifactPrefix, releasePrefix, siteId: publishedSiteId });
+    return this.verifyRelease(releasePrefix, publishedSiteId, assetUrls);
   }
 }
 
@@ -138,7 +165,18 @@ async function main(): Promise<void> {
   const artifactRoot = join(temporaryRoot, "artifacts");
   await mkdir(staticRoot, { recursive: true });
   await mkdir(artifactRoot, { recursive: true });
-  const staticServer = await startStaticServer(staticRoot);
+  const repository = new InMemorySiteRepository();
+  let publisher: LocalStaticPublisher | undefined;
+  const staticServer = await startStaticServer(staticRoot, {
+    resolveActiveSite: async (requestedSiteId) => {
+      const previewState = await repository.getPreviewState(requestedSiteId);
+      if (!previewState) return undefined;
+      return publisher?.getReleaseDirectory(
+        `releases/${requestedSiteId}/${previewState.activeDeploymentId}/${previewState.activeArtifactId}`
+      );
+    },
+    resolveCandidate: (candidateId) => publisher?.getCandidateDirectory(candidateId)
+  });
 
   try {
     const logo = await readFile(logoPath);
@@ -146,8 +184,7 @@ async function main(): Promise<void> {
     await mkdir(join(staticRoot, "assets"), { recursive: true });
     await writeFile(join(staticRoot, "assets", "jinyuan-example-logo.svg"), logo);
 
-    const repository = new InMemorySiteRepository();
-    const publisher = new LocalStaticPublisher(artifactRoot, staticRoot, staticServer.baseUrl);
+    publisher = new LocalStaticPublisher(artifactRoot, staticRoot, staticServer.baseUrl);
     const deploymentService = new DeploymentService(repository, publisher);
     // This only creates an in-process Hono handler; no API network listener is started.
     const app = createApp(repository, { actorId: "Pan", deploymentService });
@@ -234,6 +271,7 @@ async function main(): Promise<void> {
       if (status.previewUrl !== `${staticServer.baseUrl}/${siteId}`) {
         throw new Error(`unexpected_preview_url:${run}`);
       }
+      await verifyStaticPreview(status.previewUrl, [assetUrl]);
       durations.push(performance.now() - startedAt);
       jobs.push({ run, revision, jobId: created.jobId, artifactId: status.artifactId, previewUrl: status.previewUrl });
     }
@@ -275,7 +313,11 @@ async function main(): Promise<void> {
   }
 }
 
-async function verifyStaticPreview(previewUrl: string, additionalResourceUrls: string[]): Promise<void> {
+async function verifyStaticPreview(
+  previewUrl: string,
+  additionalResourceUrls: string[],
+  resourcePathPrefix?: string
+): Promise<void> {
   let homepage = "";
   for (const path of ["/", "/products", "/certifications", "/about", "/contact"]) {
     const response = await fetch(`${previewUrl}${path}`);
@@ -291,7 +333,10 @@ async function verifyStaticPreview(previewUrl: string, additionalResourceUrls: s
   for (const match of homepage.matchAll(/\b(?:src|href)=["']([^"']+)["']/gi)) {
     const reference = match[1];
     if (!reference || /^(?:#|data:|mailto:|tel:|javascript:)/i.test(reference)) continue;
-    resourceUrls.add(new URL(reference, `${previewUrl}/`).toString());
+    const baseUrl = resourcePathPrefix
+      ? `${new URL(previewUrl).origin}/${resourcePathPrefix.replace(/^\/+|\/+$/g, "")}/`
+      : `${previewUrl}/`;
+    resourceUrls.add(new URL(reference.replace(/^\//, ""), baseUrl).toString());
   }
   for (const resourceUrl of resourceUrls) {
     const response = await fetch(resourceUrl);
@@ -299,11 +344,17 @@ async function verifyStaticPreview(previewUrl: string, additionalResourceUrls: s
   }
 }
 
-async function startStaticServer(root: string): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+async function startStaticServer(
+  root: string,
+  resolver: {
+    resolveActiveSite(siteId: string): Promise<string | undefined>;
+    resolveCandidate(candidateId: string): string | undefined;
+  }
+): Promise<{ baseUrl: string; close: () => Promise<void> }> {
   const server = createServer(async (request, response) => {
     try {
       const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-      const filePath = resolveStaticPath(root, pathname);
+      const filePath = await resolveStaticPath(root, pathname, resolver);
       if (!filePath) {
         response.writeHead(404).end();
         return;
@@ -329,19 +380,56 @@ async function startStaticServer(root: string): Promise<{ baseUrl: string; close
   };
 }
 
-function resolveStaticPath(root: string, pathname: string): string | undefined {
+async function resolveStaticPath(
+  root: string,
+  pathname: string,
+  resolver: {
+    resolveActiveSite(siteId: string): Promise<string | undefined>;
+    resolveCandidate(candidateId: string): string | undefined;
+  }
+): Promise<string | undefined> {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.some((segment) => segment === "." || segment === "..")) return undefined;
-  const relativePath = segments.length === 0
-    ? join(siteId, "index.html")
-    : segments[0] === "assets"
-      ? join(...segments)
-      : join(...segments, "index.html");
-  const candidate = resolve(root, relativePath);
-  if (!candidate.startsWith(`${resolve(root)}${process.platform === "win32" ? "\\" : "/"}`)) {
+  if (segments[0] === "assets") {
+    const activeDirectory = await resolver.resolveActiveSite(siteId);
+    const activeAsset = activeDirectory
+      ? resolveContainedPath(activeDirectory, join(...segments))
+      : undefined;
+    if (activeAsset && await pathExists(activeAsset)) return activeAsset;
+    return resolveContainedPath(root, join(...segments));
+  }
+  const isCandidate = segments[0] === "__candidate";
+  const siteDirectory = isCandidate
+    ? resolver.resolveCandidate(segments[1] ?? "")
+    : await resolver.resolveActiveSite(segments[0] ?? siteId);
+  if (!siteDirectory) return undefined;
+  const routeSegments = isCandidate ? segments.slice(2) : segments.slice(1);
+  const relativePath = routeSegments.length === 0
+    ? "index.html"
+    : routeSegments.at(-1)?.includes(".")
+      ? join(...routeSegments)
+      : "index.html";
+  const candidate = resolve(siteDirectory, relativePath);
+  if (!candidate.startsWith(`${resolve(siteDirectory)}${process.platform === "win32" ? "\\" : "/"}`)) {
     return undefined;
   }
   return candidate;
+}
+
+function resolveContainedPath(root: string, relativePath: string): string | undefined {
+  const candidate = resolve(root, relativePath);
+  return candidate.startsWith(`${resolve(root)}${process.platform === "win32" ? "\\" : "/"}`)
+    ? candidate
+    : undefined;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function contentTypeFor(path: string): string {

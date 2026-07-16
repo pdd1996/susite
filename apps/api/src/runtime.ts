@@ -48,8 +48,12 @@ export function createRuntimeInfrastructure(
       })
     : new InMemoryObjectStorage();
   const publisher =
-    hasOssConfig && env.PLATFORM_DOMAIN
-      ? new TemplatePreviewPublisher(objectStorage, env.PLATFORM_DOMAIN)
+    hasOssConfig && env.PLATFORM_DOMAIN && env.PREVIEW_RELEASE_HEALTH_BASE_URL
+      ? new TemplatePreviewPublisher(
+          objectStorage,
+          env.PLATFORM_DOMAIN,
+          env.PREVIEW_RELEASE_HEALTH_BASE_URL
+        )
       : new UnavailablePreviewPublisher();
 
   return { repository, objectStorage, publisher, hasOssConfig };

@@ -40,6 +40,8 @@ describeMySql("MySQL repository integration", () => {
   }
   const repository = createMySqlRepository(databaseUrl);
   const tables = [
+    "deployment_events",
+    "site_preview_states",
     "deployments",
     "build_artifacts",
     "assets",
@@ -306,12 +308,123 @@ describeMySql("MySQL repository integration", () => {
     expect(concurrentArtifactClaims.filter((claim) => !claim.claimed)).toHaveLength(1);
   });
 
+  it("atomically activates preview state, fences stale workers and persists ordered events", async () => {
+    await repository.createSite(
+      { siteId: "mysql-preview-site", name: "预览原子站点", template: "b2b-manufacturing-v1" },
+      config,
+      "mysql-worker"
+    );
+    const now = new Date().toISOString();
+    const artifactInput = {
+      artifactId: "artifact_mysql_preview",
+      siteId: "mysql-preview-site",
+      revision: 1,
+      template: "b2b-manufacturing-v1" as const,
+      templateVersion: "1.0.0",
+      inputChecksum: "f".repeat(64),
+      location: "artifacts/mysql-preview-site/r1/1.0.0/artifact_mysql_preview",
+      status: "building" as const,
+      createdBy: "mysql-worker",
+      createdAt: now
+    };
+    const artifactClaim = await repository.claimArtifact(
+      artifactInput,
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    await repository.markArtifactReady(artifactInput.artifactId, artifactClaim.artifact.leaseToken!);
+
+    for (const suffix of ["a", "b"]) {
+      await repository.createDeployment({
+        deploymentId: `deployment_preview_${suffix}`,
+        jobId: `job_preview_${suffix}`,
+        siteId: "mysql-preview-site",
+        revision: 1,
+        artifactId: artifactInput.artifactId,
+        targetArtifactId: artifactInput.artifactId,
+        kind: "rollback",
+        environment: "preview",
+        idempotencyKey: `preview-${suffix}`,
+        status: "queued",
+        attemptCount: 0,
+        maxAttempts: 3,
+        placeholderAssetIds: [],
+        createdBy: "mysql-worker",
+        createdAt: now,
+        updatedAt: now
+      });
+    }
+    const lease = new Date(Date.now() + 60_000).toISOString();
+    const first = await repository.claimNextDeployment(lease);
+    const second = await repository.claimNextDeployment(lease);
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    await expect(repository.activatePreview({
+      siteId: "mysql-preview-site",
+      deploymentId: first!.deploymentId,
+      artifactId: artifactInput.artifactId,
+      leaseToken: first!.leaseToken! - 1,
+      expectedVersion: 0,
+      previewUrl: "https://mysql-preview.test",
+      activatedAt: now
+    })).resolves.toBe("lease_lost");
+
+    const activations = await Promise.all([
+      repository.activatePreview({
+        siteId: "mysql-preview-site",
+        deploymentId: first!.deploymentId,
+        artifactId: artifactInput.artifactId,
+        leaseToken: first!.leaseToken!,
+        expectedVersion: 0,
+        previewUrl: "https://mysql-preview.test",
+        activatedAt: now
+      }),
+      repository.activatePreview({
+        siteId: "mysql-preview-site",
+        deploymentId: second!.deploymentId,
+        artifactId: artifactInput.artifactId,
+        leaseToken: second!.leaseToken!,
+        expectedVersion: 0,
+        previewUrl: "https://mysql-preview.test",
+        activatedAt: now
+      })
+    ]);
+    expect(activations.filter((result) => result === "activated")).toHaveLength(1);
+    expect(activations.filter((result) => result === "activation_conflict")).toHaveLength(1);
+    await expect(repository.getPreviewState("mysql-preview-site")).resolves.toMatchObject({
+      activeArtifactId: artifactInput.artifactId,
+      version: 1
+    });
+
+    await repository.appendDeploymentEvent({
+      deploymentId: first!.deploymentId,
+      siteId: "mysql-preview-site",
+      attempt: 1,
+      stage: "claimed",
+      level: "info",
+      code: "deployment_claimed",
+      message: "任务已领取"
+    });
+    await repository.appendDeploymentEvent({
+      deploymentId: first!.deploymentId,
+      siteId: "mysql-preview-site",
+      attempt: 1,
+      stage: "activated",
+      level: "info",
+      code: "activation_succeeded",
+      message: "激活成功"
+    });
+    await expect(repository.listDeploymentEvents("mysql-preview-site", first!.jobId))
+      .resolves.toMatchObject([{ sequence: 1 }, { sequence: 2 }]);
+    await expect(repository.listDeploymentEvents("mysql-other-site", first!.jobId))
+      .resolves.toBeUndefined();
+  });
+
   it("records migration checksums and installs critical constraints", async () => {
     const pool = mysql.createPool(databaseUrl);
     const [migrations] = await pool.query<RowDataPacket[]>(
       "SELECT filename, checksum_sha256 FROM `_zhansite_migrations` ORDER BY filename"
     );
-    expect(migrations).toHaveLength(5);
+    expect(migrations).toHaveLength(6);
     const [constraints] = await pool.query<RowDataPacket[]>(
       `SELECT constraint_name
          FROM information_schema.table_constraints
@@ -320,17 +433,25 @@ describeMySql("MySQL repository integration", () => {
             'build_artifacts_revision_fk',
             'deployments_revision_fk',
             'deployments_artifact_identity_fk',
-            'assets_source_approval_ck'
+            'assets_source_approval_ck',
+            'site_preview_states_artifact_fk',
+            'site_preview_states_deployment_fk',
+            'deployment_events_deployment_fk'
           )`
     );
-    expect(constraints).toHaveLength(4);
+    expect(constraints).toHaveLength(7);
     const [indexes] = await pool.query<RowDataPacket[]>(
       `SELECT DISTINCT index_name
          FROM information_schema.statistics
         WHERE table_schema = DATABASE()
-          AND index_name IN ('deployments_claim_idx', 'audit_logs_site_created_idx')`
+          AND index_name IN (
+            'deployments_claim_idx',
+            'audit_logs_site_created_idx',
+            'deployment_events_order_uq',
+            'site_preview_states_identity_uq'
+          )`
     );
-    expect(indexes).toHaveLength(2);
+    expect(indexes).toHaveLength(4);
     await pool.end();
   });
 });
