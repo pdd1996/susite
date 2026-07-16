@@ -2,11 +2,11 @@
 
 展站是面向 B2B 制造、贸易企业的**配置驱动建站与预览发布平台**。V1 服务内部运营与交付人员：通过固定模板、版本化配置和素材管理，在短时间内交付可通过微信分享的企业官网预览链接。
 
-> 当前仓库同时承载产品与交付文档，以及 Phase 1 的可运行平台代码。
+> 当前仓库同时承载产品与交付文档，以及 Phase 2 正在实施的平台代码。
 
 ## 当前状态
 
-- **当前阶段**：Phase 0 与 Phase 1（配置与版本）已完成；Phase 2（素材与预览）待启动。
+- **当前阶段**：Phase 0 与 Phase 1 已完成；Phase 2（素材与预览）实施中。Asset、受限上传、构建任务和后台交互已有本地可测试实现，真实 OSS/HTTPS 验收仍受云资源与素材阻塞。
 - **V1 范围**：内部运营后台、`SiteRevision`、素材上传、异步构建与平台预览。
 - **V1 非目标**：客户自助 SaaS、产品化 AI Agent、客户正式域名绑定和 ICP 流程。
 - **首个样板**：杭州金源电器；可运行的原型位于相邻的 `jinyuan-mvp` 工作区。
@@ -22,8 +22,10 @@
 | [文档权威来源 ADR](./docs/adr/ADR-0001-doc-authority.md) | 文档职责、冲突处理与同步规则 |
 | [Spec 文档治理 ADR](./docs/adr/ADR-0002-spec-driven-document-governance.md) | 变更 Spec 的创建、验收、回写和归档规则 |
 | [变更 Spec 使用说明](./.doc/README.md) | 活跃变更包、归档与模板 |
-| [Phase 1 开发指南](./docs/guides/DEV_GUIDE.md) | 安装、运行、验证与工作区说明 |
-| [Phase 1 数据库设计](./docs/guides/DATABASE.md) | 数据模型、并发控制与 migration |
+| [开发指南](./docs/guides/DEV_GUIDE.md) | 安装、运行、Phase 2 本地上传与验证说明 |
+| [数据库设计](./docs/guides/DATABASE.md) | Revision、Asset、Artifact、Deployment 与 migration |
+| [预览部署指南](./docs/guides/DEPLOYMENT.md) | OSS、域名、证书、环境变量与真实验收前置条件 |
+| [Phase 2 活跃 Spec](./.doc/specs/active/phase-2-assets-and-preview/spec.md) | 素材与预览的范围、验收及外部阻塞 |
 | [金源样板站索引](./docs/jinyuan/README.md) | 样板站范围、待补齐项与文档导航 |
 | [金源官网 PRD](./docs/jinyuan/金源电器官网-产品需求文档(PRD).md) | 首个样板客户的内容与功能需求 |
 | [金源设计规范](./docs/jinyuan/金源电器官网-设计规范.md) | 样板站视觉与交互规范 |
@@ -37,7 +39,7 @@
 ## 仓库与原型的关系
 
 ```text
-susite（Phase 1 monorepo）
+susite（Phase 2 monorepo）
   ├─ docs/：产品、交付和开发规范
   ├─ .doc/：活跃与归档的变更 Spec
   ├─ packages/site-config：配置契约

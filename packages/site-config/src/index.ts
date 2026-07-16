@@ -113,7 +113,8 @@ export const SiteConfigSchema = z.strictObject({
 export const CreateSiteSchema = z.strictObject({
   siteId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
   name: shortTextSchema,
-  template: z.literal("b2b-manufacturing-v1")
+  template: z.literal("b2b-manufacturing-v1"),
+  config: SiteConfigSchema
 });
 
 export const CreateRevisionSchema = z.strictObject({

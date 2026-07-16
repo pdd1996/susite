@@ -12,11 +12,15 @@
   "dependencies": {
     "@hono/node-server": "^2.0.9",
     "@zhansite/site-config": "workspace:*",
+    "ali-oss": "^6.23.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.30",
-    "mysql2": "^3.23.0"
+    "mysql2": "^3.23.0",
+    "pdf-lib": "^1.17.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/ali-oss": "^6.23.3",
     "drizzle-kit": "^0.31.10"
   }
 }
