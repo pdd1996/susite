@@ -57,6 +57,7 @@ export type BuildArtifact = {
   location: string;
   status: "building" | "ready";
   leaseExpiresAt?: string;
+  leaseToken?: number;
   createdBy: string;
   createdAt: string;
 };
@@ -75,6 +76,7 @@ export type Deployment = {
   previewUrl?: string;
   errorSummary?: string;
   leaseExpiresAt?: string;
+  leaseToken?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -111,13 +113,14 @@ export type SiteRepository = {
     artifact: BuildArtifact,
     leaseExpiresAt: string
   ): Promise<{ artifact: BuildArtifact; claimed: boolean }>;
-  markArtifactReady(artifactId: string): Promise<BuildArtifact | undefined>;
+  markArtifactReady(artifactId: string, leaseToken: number): Promise<BuildArtifact | undefined>;
   createDeployment(deployment: Deployment): Promise<{ deployment: Deployment; created: boolean }>;
   getDeployment(siteId: string, jobId: string): Promise<Deployment | undefined>;
   claimNextDeployment(leaseExpiresAt: string): Promise<Deployment | undefined>;
   updateDeployment(
     siteId: string,
     jobId: string,
+    leaseToken: number,
     patch: Partial<
       Pick<Deployment, "artifactId" | "status" | "previewUrl" | "errorSummary" | "leaseExpiresAt">
     >
@@ -242,15 +245,28 @@ export class InMemorySiteRepository implements SiteRepository {
     if (existing?.leaseExpiresAt && Date.parse(existing.leaseExpiresAt) > Date.now()) {
       return { artifact: existing, claimed: false };
     }
-    const claimed = { ...artifact, status: "building" as const, leaseExpiresAt };
+    const claimed = {
+      ...artifact,
+      status: "building" as const,
+      leaseExpiresAt,
+      leaseToken: (existing?.leaseToken ?? 0) + 1
+    };
     this.artifacts.set(artifact.artifactId, claimed);
     this.audit(artifact.createdBy, "artifact.created", artifact.siteId, artifact.artifactId);
     return { artifact: claimed, claimed: true };
   }
 
-  async markArtifactReady(artifactId: string): Promise<BuildArtifact | undefined> {
+  async markArtifactReady(artifactId: string, leaseToken: number): Promise<BuildArtifact | undefined> {
     const artifact = this.artifacts.get(artifactId);
-    if (!artifact) return undefined;
+    if (
+      !artifact ||
+      artifact.status !== "building" ||
+      artifact.leaseToken !== leaseToken ||
+      !artifact.leaseExpiresAt ||
+      Date.parse(artifact.leaseExpiresAt) <= Date.now()
+    ) {
+      return undefined;
+    }
     const ready = { ...artifact, status: "ready" as const, leaseExpiresAt: undefined };
     this.artifacts.set(artifactId, ready);
     return ready;
@@ -284,6 +300,7 @@ export class InMemorySiteRepository implements SiteRepository {
       ...deployment,
       status: "building" as const,
       leaseExpiresAt,
+      leaseToken: (deployment.leaseToken ?? 0) + 1,
       updatedAt: new Date().toISOString()
     };
     this.deployments.set(claimed.jobId, claimed);
@@ -293,12 +310,20 @@ export class InMemorySiteRepository implements SiteRepository {
   async updateDeployment(
     siteId: string,
     jobId: string,
+    leaseToken: number,
     patch: Partial<
       Pick<Deployment, "artifactId" | "status" | "previewUrl" | "errorSummary" | "leaseExpiresAt">
     >
   ): Promise<Deployment | undefined> {
     const current = await this.getDeployment(siteId, jobId);
-    if (!current) return undefined;
+    if (
+      !current ||
+      current.leaseToken !== leaseToken ||
+      !current.leaseExpiresAt ||
+      Date.parse(current.leaseExpiresAt) <= Date.now()
+    ) {
+      return undefined;
+    }
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
     this.deployments.set(jobId, updated);
     return updated;

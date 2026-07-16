@@ -1,5 +1,7 @@
 import {
   bigint,
+  check,
+  foreignKey,
   index,
   int,
   json,
@@ -9,6 +11,7 @@ import {
   uniqueIndex,
   varchar
 } from "drizzle-orm/mysql-core";
+import { sql } from "drizzle-orm";
 import type { SiteConfig } from "@zhansite/site-config";
 
 export const sites = mysqlTable("sites", {
@@ -36,16 +39,20 @@ export const siteRevisions = mysqlTable(
   (table) => [uniqueIndex("site_revisions_site_revision_uq").on(table.siteId, table.revision)]
 );
 
-export const auditLogs = mysqlTable("audit_logs", {
-  id: int("id").autoincrement().primaryKey(),
-  actorId: varchar("actor_id", { length: 100 }).notNull(),
-  action: varchar("action", { length: 80 }).notNull(),
-  siteId: varchar("site_id", { length: 80 })
-    .notNull()
-    .references(() => sites.siteId, { onDelete: "restrict", onUpdate: "cascade" }),
-  targetId: varchar("target_id", { length: 100 }).notNull(),
-  createdAt: timestamp("created_at").notNull().defaultNow()
-});
+export const auditLogs = mysqlTable(
+  "audit_logs",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    actorId: varchar("actor_id", { length: 100 }).notNull(),
+    action: varchar("action", { length: 80 }).notNull(),
+    siteId: varchar("site_id", { length: 80 })
+      .notNull()
+      .references(() => sites.siteId, { onDelete: "restrict", onUpdate: "cascade" }),
+    targetId: varchar("target_id", { length: 100 }).notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow()
+  },
+  (table) => [index("audit_logs_site_created_idx").on(table.siteId, table.createdAt)]
+);
 
 export const assets = mysqlTable(
   "assets",
@@ -72,7 +79,20 @@ export const assets = mysqlTable(
   },
   (table) => [
     uniqueIndex("assets_object_key_uq").on(table.objectKey),
-    index("assets_site_created_idx").on(table.siteId, table.createdAt)
+    index("assets_site_created_idx").on(table.siteId, table.createdAt),
+    check(
+      "assets_source_approval_ck",
+      sql`(${table.sourceKind} = 'customer_provided' AND ${table.placeholderApprovedBy} IS NULL AND ${table.placeholderApprovedAt} IS NULL)
+        OR (${table.sourceKind} = 'placeholder' AND (
+          (${table.placeholderApprovedBy} IS NULL AND ${table.placeholderApprovedAt} IS NULL)
+          OR (${table.placeholderApprovedBy} IS NOT NULL AND ${table.placeholderApprovedAt} IS NOT NULL)
+        ))`
+    ),
+    check("assets_status_ck", sql`${table.status} = 'verified'`),
+    check(
+      "assets_type_ck",
+      sql`${table.type} IN ('logo', 'product_image', 'certificate_image', 'product_pdf', 'wechat_qr', 'factory_image')`
+    )
   ]
 );
 
@@ -90,6 +110,7 @@ export const buildArtifacts = mysqlTable(
     location: varchar("location", { length: 512 }).notNull(),
     status: varchar("status", { length: 20 }).notNull(),
     leaseExpiresAt: timestamp("lease_expires_at"),
+    leaseToken: bigint("lease_token", { mode: "number", unsigned: true }).notNull().default(0),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     createdAt: timestamp("created_at").notNull().defaultNow()
   },
@@ -99,7 +120,16 @@ export const buildArtifacts = mysqlTable(
       table.revision,
       table.templateVersion,
       table.inputChecksum
-    )
+    ),
+    uniqueIndex("build_artifacts_identity_uq").on(table.artifactId, table.siteId, table.revision),
+    foreignKey({
+      name: "build_artifacts_revision_fk",
+      columns: [table.siteId, table.revision],
+      foreignColumns: [siteRevisions.siteId, siteRevisions.revision]
+    })
+      .onUpdate("cascade")
+      .onDelete("restrict"),
+    check("build_artifacts_status_ck", sql`${table.status} IN ('building', 'ready')`)
   ]
 );
 
@@ -112,10 +142,7 @@ export const deployments = mysqlTable(
       .notNull()
       .references(() => sites.siteId, { onDelete: "restrict", onUpdate: "cascade" }),
     revision: int("revision").notNull(),
-    artifactId: varchar("artifact_id", { length: 110 }).references(() => buildArtifacts.artifactId, {
-      onDelete: "restrict",
-      onUpdate: "cascade"
-    }),
+    artifactId: varchar("artifact_id", { length: 110 }),
     environment: varchar("environment", { length: 20 }).notNull(),
     idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
     status: varchar("status", { length: 20 }).notNull(),
@@ -123,6 +150,7 @@ export const deployments = mysqlTable(
     previewUrl: varchar("preview_url", { length: 2048 }),
     errorSummary: text("error_summary"),
     leaseExpiresAt: timestamp("lease_expires_at"),
+    leaseToken: bigint("lease_token", { mode: "number", unsigned: true }).notNull().default(0),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow()
@@ -130,6 +158,26 @@ export const deployments = mysqlTable(
   (table) => [
     uniqueIndex("deployments_job_id_uq").on(table.jobId),
     uniqueIndex("deployments_site_idempotency_uq").on(table.siteId, table.idempotencyKey),
-    index("deployments_site_created_idx").on(table.siteId, table.createdAt)
+    index("deployments_site_created_idx").on(table.siteId, table.createdAt),
+    index("deployments_claim_idx").on(table.status, table.leaseExpiresAt, table.createdAt),
+    foreignKey({
+      name: "deployments_revision_fk",
+      columns: [table.siteId, table.revision],
+      foreignColumns: [siteRevisions.siteId, siteRevisions.revision]
+    })
+      .onUpdate("cascade")
+      .onDelete("restrict"),
+    foreignKey({
+      name: "deployments_artifact_identity_fk",
+      columns: [table.artifactId, table.siteId, table.revision],
+      foreignColumns: [buildArtifacts.artifactId, buildArtifacts.siteId, buildArtifacts.revision]
+    })
+      .onUpdate("cascade")
+      .onDelete("restrict"),
+    check("deployments_environment_ck", sql`${table.environment} = 'preview'`),
+    check(
+      "deployments_status_ck",
+      sql`${table.status} IN ('queued', 'building', 'deploying', 'healthy', 'failed')`
+    )
   ]
 );

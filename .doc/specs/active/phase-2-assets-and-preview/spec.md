@@ -68,14 +68,16 @@ Phase 2 需要让内部运营人员以经过复核的真实素材，或已明确
 - [ ] 在已配置的非生产平台域名、泛域名 DNS 和有效 HTTPS 证书条件下，可取得格式为 `https://{siteId}.preview.{platformDomain}` 的预览 URL；部署仅在 HTTPS 首页、产品/资质/关于/联系路由及关键静态资源检查通过后标为 `healthy`，且标准配置连续 20 次部署的 P95 不超过 10 分钟。
 - [ ] 已部署的预览为纯静态 artifact：在 API 不可用时仍可浏览；在 iOS 16+ 与 Android 12+ 微信内置浏览器真机检查中可打开链接、使用拨号与下载 PDF。
 - [ ] 域名注册、DNS、证书、ICP/地域合规状态在部署指南中按“已验证”或“阻塞/待确认”如实记录；未满足前置条件时部署返回明确的不可发布状态，而非伪造 HTTPS 链接。
-- [ ] MySQL 集成测试在独立测试库中执行 migration，验证 Asset 外键/归属约束、Revision 条件更新冲突、审计记录及 Phase 2 核心查询；测试不依赖开发数据库。
+- [x] MySQL 集成测试在独立测试库中执行 migration，验证 Asset 外键/归属约束、Revision 条件更新冲突、审计记录及 Phase 2 核心查询；测试不依赖开发数据库。
+- [x] 数据库可靠性修复完成：Drizzle schema 与 SQL 约束一致；Deployment 只能引用同站点同 Revision 的 Artifact；Artifact 与 Deployment 的租约写入使用 fencing token 拒绝过期 Worker；迁移由带 checksum/version journal 的统一入口执行。
+- [x] `docs/guides/DATABASE.md` 包含 MySQL 8.0.16+ 的物理表设计、约束/索引、字符集与 UTC 契约、本机从零建库、迁移、验收和失败恢复步骤。
 - [ ] 后台交互测试覆盖 Revision 列表加载、选择历史 Revision、两次并发保存导致的 `409 revision_conflict`、提示当前服务端版本及重新加载最新版本后恢复编辑；不会静默覆盖本地编辑内容。
 - [ ] `pnpm check`、`pnpm test`、`pnpm build` 通过；在具备受控云测试凭据时，预览 smoke test 成功并保留可审计的结果。
 
 ## 验证结果
 
-- 自动化测试：`pnpm check` 通过；SiteConfig 6 项、API 6 项、模板 2 项、后台 3 项测试通过。MySQL 集成测试文件已建立，但因当前环境没有 MySQL、Docker 或 `DATABASE_URL_TEST` 而明确跳过。
+- 自动化测试：`pnpm check` 通过；SiteConfig 6 项、API 12 项、模板 2 项、后台 3 项测试通过。MySQL 8 集成测试已真实执行 migration journal、复合外键、并发领取/预留和 fencing token 验证。
 - 构建：`pnpm build` 通过；后台与固定模板均生成生产构建。
 - 格式检查：`git diff --check` 通过。
 - 本地验收：完成站点 + revision 1、Asset 分级校验、签名上传/服务端复核、上传完成幂等、Deployment 幂等、artifact 构建适配器、路由/关键资源健康检查、Revision 历史与冲突恢复交互验证。
-- 尚未完成：金源真实素材或逐项批准占位、受控 OSS、平台预览域名/DNS/证书、真实 HTTPS smoke test、20 次部署 P95、API 停止后的线上静态访问、微信真机和 MySQL 实际集成测试。独立 Worker 进程入口已实现，但尚未在受控云环境运行。因此本 Spec 保持活跃，不归档。
+- 尚未完成：金源真实素材或逐项批准占位、受控 OSS、平台预览域名/DNS/证书、真实 HTTPS smoke test、20 次部署 P95、API 停止后的线上静态访问和微信真机。独立 Worker 进程入口已实现，但尚未在受控云环境运行。因此本 Spec 保持活跃，不归档。

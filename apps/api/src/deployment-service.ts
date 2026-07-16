@@ -212,6 +212,10 @@ export class DeploymentService {
       new Date(Date.now() + 10 * 60 * 1000).toISOString()
     );
     if (!deployment) return false;
+    const deploymentLeaseToken = deployment.leaseToken;
+    if (deploymentLeaseToken === undefined) {
+      throw new Error("deployment_lease_token_missing");
+    }
     try {
       const revision = await this.repository.getRevision(deployment.siteId, deployment.revision);
       if (!revision) throw new DeploymentValidationError("revision_not_found");
@@ -258,7 +262,12 @@ export class DeploymentService {
         new Date(Date.now() + 10 * 60 * 1000).toISOString()
       );
       if (!claim.claimed && claim.artifact.status !== "ready") {
-        await this.repository.updateDeployment(deployment.siteId, deployment.jobId, { status: "queued" });
+        await this.repository.updateDeployment(
+          deployment.siteId,
+          deployment.jobId,
+          deploymentLeaseToken,
+          { status: "queued" }
+        );
         return false;
       }
       let artifact = claim.artifact;
@@ -268,31 +277,52 @@ export class DeploymentService {
           revision,
           assetUrls: Object.fromEntries(assets.map((asset) => [asset.assetId, asset.url]))
         });
-        const readyArtifact = await this.repository.markArtifactReady(artifactId);
+        if (artifact.leaseToken === undefined) throw new Error("artifact_lease_token_missing");
+        const readyArtifact = await this.repository.markArtifactReady(
+          artifactId,
+          artifact.leaseToken
+        );
         if (!readyArtifact) throw new Error("artifact_reservation_lost");
         artifact = readyArtifact;
       }
-      await this.repository.updateDeployment(deployment.siteId, deployment.jobId, {
-        artifactId: artifact.artifactId,
-        status: "deploying",
-        leaseExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
-      });
+      const deploying = await this.repository.updateDeployment(
+        deployment.siteId,
+        deployment.jobId,
+        deploymentLeaseToken,
+        {
+          artifactId: artifact.artifactId,
+          status: "deploying",
+          leaseExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+        }
+      );
+      if (!deploying) throw new Error("deployment_lease_lost");
       const previewUrl = await this.publisher.publish(
         artifact.location,
         deployment.siteId,
         Object.fromEntries(assets.map((asset) => [asset.assetId, asset.url]))
       );
-      await this.repository.updateDeployment(deployment.siteId, deployment.jobId, {
-        artifactId: artifact.artifactId,
-        status: "healthy",
-        previewUrl
-      });
+      const healthy = await this.repository.updateDeployment(
+        deployment.siteId,
+        deployment.jobId,
+        deploymentLeaseToken,
+        {
+          artifactId: artifact.artifactId,
+          status: "healthy",
+          previewUrl
+        }
+      );
+      if (!healthy) throw new Error("deployment_lease_lost");
       return true;
     } catch (error) {
-      await this.repository.updateDeployment(deployment.siteId, deployment.jobId, {
-        status: "failed",
-        errorSummary: error instanceof Error ? error.message.slice(0, 500) : "deployment_failed"
-      });
+      await this.repository.updateDeployment(
+        deployment.siteId,
+        deployment.jobId,
+        deploymentLeaseToken,
+        {
+          status: "failed",
+          errorSummary: error instanceof Error ? error.message.slice(0, 500) : "deployment_failed"
+        }
+      );
       return true;
     }
   }

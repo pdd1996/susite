@@ -1,0 +1,8 @@
+import { fileURLToPath } from "node:url";
+import { config } from "dotenv";
+
+config({
+  path: fileURLToPath(new URL("../.env", import.meta.url)),
+  override: false,
+  quiet: true
+});

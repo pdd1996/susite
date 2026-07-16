@@ -1,8 +1,8 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import mysql from "mysql2/promise";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import "./load-env.js";
+import mysql, { type RowDataPacket } from "mysql2/promise";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { SiteConfig } from "@zhansite/site-config";
+import { runMigrations } from "./migrations.js";
 import { createMySqlRepository } from "./mysql-repository.js";
 
 const databaseUrl = process.env.DATABASE_URL_TEST;
@@ -34,25 +34,37 @@ const config: SiteConfig = {
 describeMySql("MySQL repository integration", () => {
   if (!databaseUrl) return;
   const parsedUrl = new URL(databaseUrl);
-  if (!/test/i.test(parsedUrl.pathname)) {
-    throw new Error("DATABASE_URL_TEST must point to a database whose name contains 'test'.");
+  const databaseName = decodeURIComponent(parsedUrl.pathname.replace(/^\//, ""));
+  if (!databaseName.endsWith("_test")) {
+    throw new Error("DATABASE_URL_TEST must point to a database whose name ends with '_test'.");
   }
   const repository = createMySqlRepository(databaseUrl);
-  const tables = ["deployments", "build_artifacts", "assets", "audit_logs", "site_revisions", "sites"];
+  const tables = [
+    "deployments",
+    "build_artifacts",
+    "assets",
+    "audit_logs",
+    "site_revisions",
+    "sites",
+    "_zhansite_migrations"
+  ];
 
   beforeAll(async () => {
     const pool = mysql.createPool({ uri: databaseUrl, multipleStatements: true });
     await pool.query("SET FOREIGN_KEY_CHECKS = 0");
     for (const table of tables) await pool.query(`DROP TABLE IF EXISTS \`${table}\``);
     await pool.query("SET FOREIGN_KEY_CHECKS = 1");
-    for (const migration of [
-      "0000_phase1_baseline.sql",
-      "0001_add_site_foreign_keys.sql",
-      "0002_phase2_assets_and_preview.sql",
-      "0003_reliable_deployment_leases.sql"
-    ]) {
-      await pool.query(await readFile(resolve(process.cwd(), "drizzle", migration), "utf8"));
+    await pool.end();
+    await runMigrations(databaseUrl);
+  });
+
+  beforeEach(async () => {
+    const pool = mysql.createPool(databaseUrl);
+    await pool.query("SET FOREIGN_KEY_CHECKS = 0");
+    for (const table of tables.filter((table) => table !== "_zhansite_migrations")) {
+      await pool.query(`TRUNCATE TABLE \`${table}\``);
     }
+    await pool.query("SET FOREIGN_KEY_CHECKS = 1");
     await pool.end();
   });
 
@@ -150,6 +162,40 @@ describeMySql("MySQL repository integration", () => {
         expect.objectContaining({ action: "deployment.created" })
       ])
     );
+
+    const artifact = {
+      artifactId: "artifact_mysql_identity",
+      siteId: "mysql-site",
+      revision: 2,
+      template: "b2b-manufacturing-v1" as const,
+      templateVersion: "1.0.0",
+      inputChecksum: "d".repeat(64),
+      location: "artifacts/mysql-site/r2/1.0.0/artifact_mysql_identity",
+      status: "building" as const,
+      createdBy: "mysql-operator",
+      createdAt: now
+    };
+    const artifactClaim = await repository.claimArtifact(
+      artifact,
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    await repository.markArtifactReady(artifact.artifactId, artifactClaim.artifact.leaseToken!);
+    await repository.createSite(
+      { siteId: "mysql-other-site", name: "其他站点", template: "b2b-manufacturing-v1" },
+      config,
+      "mysql-operator"
+    );
+    await expect(
+      repository.createDeployment({
+        ...deployment,
+        deploymentId: "deployment_cross_artifact",
+        jobId: "job_cross_artifact",
+        siteId: "mysql-other-site",
+        revision: 1,
+        artifactId: artifact.artifactId,
+        idempotencyKey: "cross-artifact"
+      })
+    ).rejects.toBeTruthy();
   });
 
   it("claims deployments once and recovers expired deployment and artifact leases", async () => {
@@ -183,15 +229,37 @@ describeMySql("MySQL repository integration", () => {
       jobId: "job_mysql_lease",
       status: "building"
     });
-
-    await repository.updateDeployment("mysql-lease-site", "job_mysql_lease", {
-      status: "building",
-      leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
-    });
-    await expect(repository.claimNextDeployment(futureLease)).resolves.toMatchObject({
+    const firstDeploymentClaim = concurrentClaims.find(Boolean)!;
+    const firstDeploymentToken = firstDeploymentClaim.leaseToken!;
+    const expirationPool = mysql.createPool(databaseUrl);
+    await expirationPool.query(
+      `UPDATE deployments
+          SET lease_expires_at = DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 SECOND)
+        WHERE job_id = 'job_mysql_lease'`
+    );
+    await expirationPool.end();
+    await expect(
+      repository.updateDeployment(
+        "mysql-lease-site",
+        "job_mysql_lease",
+        firstDeploymentToken,
+        { status: "healthy" }
+      )
+    ).resolves.toBeUndefined();
+    const recoveredDeployment = await repository.claimNextDeployment(futureLease);
+    expect(recoveredDeployment).toMatchObject({
       jobId: "job_mysql_lease",
-      status: "building"
+      status: "building",
+      leaseToken: firstDeploymentToken + 1
     });
+    await expect(
+      repository.updateDeployment(
+        "mysql-lease-site",
+        "job_mysql_lease",
+        firstDeploymentToken,
+        { status: "healthy" }
+      )
+    ).resolves.toBeUndefined();
 
     const artifact = {
       artifactId: "artifact_mysql_lease",
@@ -205,17 +273,64 @@ describeMySql("MySQL repository integration", () => {
       createdBy: "mysql-worker",
       createdAt: now
     };
+    const firstArtifactClaim = await repository.claimArtifact(
+      artifact,
+      new Date(Date.now() - 1_000).toISOString()
+    );
+    expect(firstArtifactClaim).toMatchObject({ claimed: true, artifact: { leaseToken: 1 } });
     await expect(
-      repository.claimArtifact(artifact, new Date(Date.now() - 1_000).toISOString())
-    ).resolves.toMatchObject({ claimed: true });
-    await expect(repository.claimArtifact(artifact, futureLease)).resolves.toMatchObject({
+      repository.markArtifactReady(artifact.artifactId, firstArtifactClaim.artifact.leaseToken!)
+    ).resolves.toBeUndefined();
+    const recoveredArtifact = await repository.claimArtifact(artifact, futureLease);
+    expect(recoveredArtifact).toMatchObject({
       claimed: true,
-      artifact: { artifactId: "artifact_mysql_lease", status: "building" }
+      artifact: { artifactId: "artifact_mysql_lease", status: "building", leaseToken: 2 }
     });
-    await repository.markArtifactReady(artifact.artifactId);
+    await repository.markArtifactReady(artifact.artifactId, recoveredArtifact.artifact.leaseToken!);
     await expect(repository.claimArtifact(artifact, futureLease)).resolves.toMatchObject({
       claimed: false,
       artifact: { status: "ready" }
     });
+
+    const concurrentArtifact = {
+      ...artifact,
+      artifactId: "artifact_mysql_concurrent",
+      inputChecksum: "e".repeat(64),
+      location: "artifacts/mysql-lease-site/r1/1.0.0/artifact_mysql_concurrent"
+    };
+    const concurrentArtifactClaims = await Promise.all([
+      repository.claimArtifact(concurrentArtifact, futureLease),
+      repository.claimArtifact(concurrentArtifact, futureLease)
+    ]);
+    expect(concurrentArtifactClaims.filter((claim) => claim.claimed)).toHaveLength(1);
+    expect(concurrentArtifactClaims.filter((claim) => !claim.claimed)).toHaveLength(1);
+  });
+
+  it("records migration checksums and installs critical constraints", async () => {
+    const pool = mysql.createPool(databaseUrl);
+    const [migrations] = await pool.query<RowDataPacket[]>(
+      "SELECT filename, checksum_sha256 FROM `_zhansite_migrations` ORDER BY filename"
+    );
+    expect(migrations).toHaveLength(5);
+    const [constraints] = await pool.query<RowDataPacket[]>(
+      `SELECT constraint_name
+         FROM information_schema.table_constraints
+        WHERE table_schema = DATABASE()
+          AND constraint_name IN (
+            'build_artifacts_revision_fk',
+            'deployments_revision_fk',
+            'deployments_artifact_identity_fk',
+            'assets_source_approval_ck'
+          )`
+    );
+    expect(constraints).toHaveLength(4);
+    const [indexes] = await pool.query<RowDataPacket[]>(
+      `SELECT DISTINCT index_name
+         FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND index_name IN ('deployments_claim_idx', 'audit_logs_site_created_idx')`
+    );
+    expect(indexes).toHaveLength(2);
+    await pool.end();
   });
 });

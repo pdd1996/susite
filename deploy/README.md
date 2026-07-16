@@ -12,16 +12,13 @@ pnpm dev:admin
 
 ## MySQL
 
-按顺序执行：
+创建符合 `docs/guides/DATABASE.md` 契约的 MySQL 8.0.16+ 数据库，设置 `DATABASE_URL` 后执行：
 
-```text
-apps/api/drizzle/0000_phase1_baseline.sql
-apps/api/drizzle/0001_add_site_foreign_keys.sql
-apps/api/drizzle/0002_phase2_assets_and_preview.sql
-apps/api/drizzle/0003_reliable_deployment_leases.sql
+```powershell
+pnpm --filter @zhansite/api db:migrate
 ```
 
-然后设置 `DATABASE_URL`。集成测试必须使用独立的 `DATABASE_URL_TEST`。
+统一迁移器会执行全部 migration 并登记 checksum。集成测试必须使用库名以 `_test` 结尾的独立 `DATABASE_URL_TEST`。
 
 ## 真实预览
 

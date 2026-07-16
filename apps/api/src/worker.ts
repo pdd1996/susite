@@ -1,3 +1,4 @@
+import "./load-env.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { DeploymentService } from "./deployment-service.js";
 import { createRuntimeInfrastructure } from "./runtime.js";

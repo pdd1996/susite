@@ -320,6 +320,89 @@ describe("Phase 1 site API", () => {
     });
   });
 
+  it("rejects stale artifact and deployment lease tokens", async () => {
+    const repository = new InMemorySiteRepository();
+    await repository.createSite(
+      { siteId: "lease-site", name: "Lease Site", template: "b2b-manufacturing-v1" },
+      config,
+      "operator"
+    );
+    const now = new Date().toISOString();
+    const artifact = {
+      artifactId: "artifact_lease",
+      siteId: "lease-site",
+      revision: 1,
+      template: "b2b-manufacturing-v1" as const,
+      templateVersion: "1.0.0",
+      inputChecksum: "c".repeat(64),
+      location: "artifacts/lease-site/r1/1.0.0/artifact_lease",
+      status: "building" as const,
+      createdBy: "operator",
+      createdAt: now
+    };
+    const firstArtifact = await repository.claimArtifact(
+      artifact,
+      new Date(Date.now() - 1_000).toISOString()
+    );
+    await expect(
+      repository.markArtifactReady(artifact.artifactId, firstArtifact.artifact.leaseToken!)
+    ).resolves.toBeUndefined();
+    const secondArtifact = await repository.claimArtifact(
+      artifact,
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    await expect(
+      repository.markArtifactReady(artifact.artifactId, firstArtifact.artifact.leaseToken!)
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.markArtifactReady(artifact.artifactId, secondArtifact.artifact.leaseToken!)
+    ).resolves.toMatchObject({ status: "ready" });
+
+    await repository.createDeployment({
+      deploymentId: "deployment_lease",
+      jobId: "job_lease",
+      siteId: "lease-site",
+      revision: 1,
+      environment: "preview",
+      idempotencyKey: "lease",
+      status: "queued",
+      placeholderAssetIds: [],
+      createdBy: "operator",
+      createdAt: now,
+      updatedAt: now
+    });
+    const firstDeployment = await repository.claimNextDeployment(
+      new Date(Date.now() - 1_000).toISOString()
+    );
+    await expect(
+      repository.updateDeployment(
+        "lease-site",
+        "job_lease",
+        firstDeployment!.leaseToken!,
+        { status: "healthy" }
+      )
+    ).resolves.toBeUndefined();
+    const secondDeployment = await repository.claimNextDeployment(
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    await expect(
+      repository.updateDeployment(
+        "lease-site",
+        "job_lease",
+        firstDeployment!.leaseToken!,
+        { status: "healthy" }
+      )
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.updateDeployment(
+        "lease-site",
+        "job_lease",
+        secondDeployment!.leaseToken!,
+        { status: "healthy" }
+      )
+    ).resolves.toMatchObject({ status: "healthy" });
+  });
+
   it("requires routes and referenced static resources to pass preview health checks", async () => {
     const healthyFetch = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
