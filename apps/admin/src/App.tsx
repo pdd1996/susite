@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SiteConfig } from "@zhansite/site-config";
 import { parseConfigJson } from "./config-json.js";
 
@@ -48,9 +48,40 @@ type Deployment = {
   jobId: string;
   revision: number;
   status: string;
+  kind?: "publish" | "rollback";
+  attemptCount?: number;
+  maxAttempts?: number;
+  nextAttemptAt?: string;
+  lastErrorCode?: string;
+  lastErrorClass?: "transient" | "permanent" | "concurrency";
+  servingPreviousHealthyVersion?: boolean;
   placeholderAssetIds: string[];
   previewUrl?: string;
   errorSummary?: string;
+};
+type PreviewState = {
+  activeArtifactId: string;
+  activeDeploymentId: string;
+  revision?: number;
+  previewUrl: string;
+  version: number;
+  activatedAt: string;
+};
+type ReadyArtifact = {
+  artifactId: string;
+  revision: number;
+  templateVersion: string;
+  createdAt: string;
+};
+type DeploymentEvent = {
+  eventId: string;
+  attempt: number;
+  sequence: number;
+  stage: string;
+  level: string;
+  code: string;
+  message: string;
+  createdAt: string;
 };
 
 const assetTypes = [
@@ -98,6 +129,12 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
   const [uploadFile, setUploadFile] = useState<File>();
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [deployment, setDeployment] = useState<Deployment>();
+  const [previewState, setPreviewState] = useState<PreviewState>();
+  const [readyArtifacts, setReadyArtifacts] = useState<ReadyArtifact[]>([]);
+  const [deploymentEvents, setDeploymentEvents] = useState<DeploymentEvent[]>([]);
+  const [reliabilityError, setReliabilityError] = useState("");
+  const [deploymentEventsError, setDeploymentEventsError] = useState("");
+  const activeSiteIdRef = useRef(siteId);
 
   const request = (path: string, init?: RequestInit) => fetch(`${apiBaseUrl}${path}`, init);
   const loadSites = async () => {
@@ -109,14 +146,44 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
   };
   const loadAssets = async (selectedSiteId: string) => {
     const response = await request(`/sites/${selectedSiteId}/assets`);
-    setAssets(response.ok ? await response.json() : []);
+    const loaded = response.ok ? await response.json() : [];
+    if (activeSiteIdRef.current === selectedSiteId) setAssets(loaded);
   };
   const loadHistory = async (selectedSiteId: string) => {
     const response = await request(`/sites/${selectedSiteId}/revisions`);
     if (!response.ok) throw new Error("无法读取 Revision 历史。");
     const history: Revision[] = await response.json();
-    setRevisions(history);
+    if (activeSiteIdRef.current === selectedSiteId) setRevisions(history);
     return history;
+  };
+  const loadPreviewState = async (selectedSiteId: string) => {
+    const response = await request(`/sites/${selectedSiteId}/preview-state`);
+    if (response.status === 404) {
+      if (activeSiteIdRef.current === selectedSiteId) setPreviewState(undefined);
+      return;
+    }
+    if (!response.ok) throw new Error("无法读取当前健康版本。");
+    const state = await response.json();
+    if (activeSiteIdRef.current === selectedSiteId) setPreviewState(state);
+  };
+  const loadReadyArtifacts = async (selectedSiteId: string) => {
+    const response = await request(`/sites/${selectedSiteId}/artifacts`);
+    if (!response.ok) throw new Error("无法读取可回滚版本。");
+    const artifacts = await response.json();
+    if (activeSiteIdRef.current === selectedSiteId) setReadyArtifacts(artifacts);
+  };
+  const loadReliability = async (selectedSiteId: string) => {
+    if (activeSiteIdRef.current === selectedSiteId) setReliabilityError("");
+    const results = await Promise.allSettled([
+      loadPreviewState(selectedSiteId),
+      loadReadyArtifacts(selectedSiteId)
+    ]);
+    if (
+      activeSiteIdRef.current === selectedSiteId &&
+      results.some((result) => result.status === "rejected")
+    ) {
+      setReliabilityError("可靠性数据暂不可用，请稍后刷新。");
+    }
   };
 
   useEffect(() => {
@@ -133,10 +200,19 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
   };
 
   const selectSite = async (site: Site) => {
+    activeSiteIdRef.current = site.siteId;
     setSiteId(site.siteId);
+    setDeployment(undefined);
+    setDeploymentEvents([]);
+    setDeploymentEventsError("");
+    setPreviewState(undefined);
+    setReadyArtifacts([]);
+    setReliabilityError("");
     const history = await loadHistory(site.siteId);
+    if (activeSiteIdRef.current !== site.siteId) return;
     if (history[0]) applyRevision(history[0]);
     await loadAssets(site.siteId);
+    await loadReliability(site.siteId);
   };
 
   const createSite = async () => {
@@ -250,28 +326,59 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
   };
 
   const createDeployment = async () => {
-    const response = await request(`/sites/${siteId}/deployments`, {
+    const selectedSiteId = siteId;
+    const response = await request(`/sites/${selectedSiteId}/deployments`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ revision: sourceRevision, idempotencyKey: crypto.randomUUID() })
     });
     const payload = await response.json();
     if (!response.ok) return setMessage(`创建预览失败：${payload.error}`);
+    if (activeSiteIdRef.current !== selectedSiteId) return;
     setDeployment(payload);
+    setDeploymentEvents([]);
+    setDeploymentEventsError("");
     setMessage(`预览任务已创建：${payload.jobId}`);
+  };
+
+  const loadDeploymentEvents = async (selectedSiteId: string, jobId: string) => {
+    try {
+      const response = await request(`/sites/${selectedSiteId}/deployments/${jobId}/events`);
+      if (activeSiteIdRef.current !== selectedSiteId) return;
+      if (!response.ok) {
+        setDeploymentEvents([]);
+        setDeploymentEventsError("阶段日志暂不可用。");
+        return;
+      }
+      const events = await response.json();
+      if (activeSiteIdRef.current !== selectedSiteId) return;
+      setDeploymentEvents(events);
+      setDeploymentEventsError("");
+    } catch {
+      if (activeSiteIdRef.current !== selectedSiteId) return;
+      setDeploymentEvents([]);
+      setDeploymentEventsError("阶段日志暂不可用。");
+    }
   };
 
   const refreshDeployment = async () => {
     if (!deployment) return;
-    const response = await request(`/sites/${siteId}/deployments/${deployment.jobId}`);
+    const selectedSiteId = siteId;
+    const jobId = deployment.jobId;
+    const response = await request(`/sites/${selectedSiteId}/deployments/${jobId}`);
     const payload = await response.json();
     if (!response.ok) return setMessage(`查询任务失败：${payload.error}`);
+    if (activeSiteIdRef.current !== selectedSiteId) return;
     setDeployment(payload);
+    await Promise.all([
+      loadDeploymentEvents(selectedSiteId, payload.jobId),
+      loadReliability(selectedSiteId)
+    ]);
     setMessage(`预览任务状态：${payload.status}`);
   };
 
   useEffect(() => {
-    if (!deployment || !["queued", "building", "deploying"].includes(deployment.status)) return;
+    if (!deployment || !["queued", "building", "deploying", "retry_waiting"].includes(deployment.status)) return;
     const timer = window.setTimeout(() => void refreshDeployment(), 2000);
     return () => window.clearTimeout(timer);
   }, [deployment?.jobId, deployment?.status]);
@@ -282,9 +389,28 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
     setMessage("预览链接已复制。");
   };
 
+  const rollbackArtifact = async (artifact: ReadyArtifact) => {
+    if (!window.confirm(
+      `确认回滚到 revision ${artifact.revision}（artifact ${artifact.artifactId}）？`
+    )) return;
+    const selectedSiteId = siteId;
+    const response = await request(`/sites/${selectedSiteId}/rollbacks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifactId: artifact.artifactId, idempotencyKey: crypto.randomUUID() })
+    });
+    const payload = await response.json();
+    if (!response.ok) return setMessage(`回滚失败：${payload.error}`);
+    if (activeSiteIdRef.current !== selectedSiteId) return;
+    setDeployment(payload);
+    setDeploymentEvents([]);
+    setDeploymentEventsError("");
+    setMessage(`回滚任务已创建：${payload.jobId}`);
+  };
+
   return (
     <main style={{ fontFamily: "Arial, 'Microsoft YaHei', sans-serif", margin: "40px auto", maxWidth: 920 }}>
-      <h1>展站运营后台 · Phase 2</h1>
+      <h1>展站运营后台 · Phase 3 本地可靠性</h1>
       <label>Site ID <input value={siteId} onChange={(event) => setSiteId(event.target.value)} /></label>
       <label>
         SiteConfig JSON
@@ -358,15 +484,38 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
 
       <h2>HTTPS 预览</h2>
       <p>当前内容来源：revision {sourceRevision}；保存基线：revision {baseRevision}</p>
+      <section aria-label="当前健康版本">
+        <h3>当前健康版本</h3>
+        {reliabilityError ? <p role="alert">{reliabilityError}</p> : null}
+        {previewState ? (
+          <p>
+            revision {previewState.revision ?? "未知"} · artifact {previewState.activeArtifactId} ·
+            版本 {previewState.version} · 激活于 {previewState.activatedAt} ·
+            <a href={previewState.previewUrl}>打开当前预览</a>
+          </p>
+        ) : <p>尚无健康版本。</p>}
+      </section>
       <button disabled={sourceRevision < 1} onClick={() => void createDeployment()}>创建预览</button>
       <button disabled={!deployment} onClick={() => void refreshDeployment()}>刷新任务状态</button>
       {deployment ? (
         <>
           <p>
-            {deployment.jobId} · {deployment.status}
+            {deployment.jobId} · {deployment.kind ?? "publish"} · {deployment.status}
+            {deployment.attemptCount !== undefined
+              ? ` · attempt ${deployment.attemptCount}/${deployment.maxAttempts ?? 3}`
+              : ""}
+            {deployment.nextAttemptAt ? ` · 下次重试 ${deployment.nextAttemptAt}` : ""}
             {deployment.previewUrl ? <> · <a href={deployment.previewUrl}>打开预览</a></> : null}
+            {deployment.lastErrorCode ? ` · ${deployment.lastErrorCode}` : ""}
             {deployment.errorSummary ? ` · ${deployment.errorSummary}` : ""}
           </p>
+          {deployment.status === "failed" ? (
+            <p role="alert">
+              {deployment.servingPreviousHealthyVersion || previewState
+                ? "发布失败；当前预览仍为上一健康版本。"
+                : "发布失败；尚无健康版本。"}
+            </p>
+          ) : null}
           {deployment.placeholderAssetIds.length > 0 ? (
             <p role="alert">本次预览包含已批准占位素材：{deployment.placeholderAssetIds.join("、")}</p>
           ) : null}
@@ -375,6 +524,34 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
           ) : null}
         </>
       ) : null}
+      <h3>阶段日志</h3>
+      {deploymentEventsError ? <p role="alert">{deploymentEventsError}</p> : null}
+      {deploymentEvents.length === 0 && !deploymentEventsError ? <p>暂无阶段日志。</p> : null}
+      {deploymentEvents.length > 0 ? (
+        <ol aria-label="部署阶段日志">
+          {deploymentEvents.map((event) => (
+            <li key={event.eventId}>
+              attempt {event.attempt} · {event.stage} · {event.code} · {event.message} · {event.createdAt}
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      <h3>历史可回滚版本</h3>
+      {readyArtifacts.length === 0 ? <p>暂无可回滚 artifact。</p> : (
+        <ul>
+          {readyArtifacts.map((artifact) => (
+            <li key={artifact.artifactId}>
+              revision {artifact.revision} · artifact {artifact.artifactId} · {artifact.createdAt}
+              <button
+                disabled={artifact.artifactId === previewState?.activeArtifactId}
+                onClick={() => void rollbackArtifact(artifact)}
+              >
+                回滚到此版本
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </main>
   );
 }
