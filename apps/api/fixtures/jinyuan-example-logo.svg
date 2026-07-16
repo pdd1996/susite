@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="240" viewBox="0 0 800 240" role="img" aria-labelledby="title description">
+  <title id="title">&#x793A;&#x4F8B; Logo</title>
+  <desc id="description">&#x4EC5;&#x7528;&#x4E8E;&#x672C;&#x5730;&#x9A8C;&#x6536;&#x7684;&#x4E2D;&#x6027;&#x5360;&#x4F4D;&#x56FE;&#xFF0C;&#x4E0D;&#x4EE3;&#x8868;&#x5BA2;&#x6237;&#x6B63;&#x5F0F;&#x54C1;&#x724C;&#x6807;&#x8BC6;</desc>
+  <rect width="800" height="240" rx="24" fill="#f5f5f5"/>
+  <rect x="16" y="16" width="768" height="208" rx="16" fill="none" stroke="#9ca3af" stroke-width="4" stroke-dasharray="12 10"/>
+  <text x="400" y="112" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="52" font-weight="700" fill="#374151">&#x793A;&#x4F8B; Logo</text>
+  <text x="400" y="164" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="24" fill="#6b7280">&#x4EC5;&#x7528;&#x4E8E;&#x672C;&#x5730;&#x9A8C;&#x6536; &#xB7; &#x975E;&#x6B63;&#x5F0F;&#x54C1;&#x724C;&#x7D20;&#x6750;</text>
+</svg>

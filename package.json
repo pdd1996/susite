@@ -7,6 +7,7 @@
     "node": ">=20.19.0"
   },
   "scripts": {
+    "acceptance:local": "pnpm --filter @zhansite/api acceptance:local",
     "build": "pnpm -r build",
     "check": "pnpm -r typecheck && pnpm -r test",
     "dev:admin": "pnpm --filter @zhansite/admin dev",
