@@ -1,0 +1,21 @@
+---
+description: Use a lightweight direct-to-main Git workflow for this solo project
+alwaysApply: true
+---
+
+# 个人 Git 工作流
+
+- 本项目为个人开发，默认不创建、更新或推送 Pull Request。
+- 只有用户明确要求创建、更新、查看或处理 PR 时，才使用 GitHub PR 操作（例如 `gh pr create`）。
+- 常规已验证的小改动直接在 `main` 提交并推送，顺序固定为：
+  1. `git switch main`，再执行 `git pull --ff-only origin main`；
+  2. 实现改动并运行与改动相称的测试、构建或本地验收；
+  3. 使用 `git status` 与 `git diff` 审查改动，排除 `dist/`、`node_modules/`、日志、密钥和临时文件；
+  4. 仅暂存本次相关文件，不使用不加审查的 `git add .`；
+  5. 用清晰且符合改动目的的提交信息执行 `git commit`；
+  6. 执行 `git push origin main`。
+- 较大、风险较高或跨多天的改动可以使用本地功能分支；完成后，经用户授权合并回本地 `main` 并推送，不需要 PR。
+- 优先使用快进合并，保持提交历史易读：
+  `git switch main` → `git pull --ff-only` → `git merge --ff-only <feature-branch>` → `git push origin main`。
+- 未经用户明确要求，不创建提交、不推送、不删除分支、不改写历史。
+- 若远程分支保护或权限要求 PR，说明该限制并请求用户决定下一步，不自行绕过。
