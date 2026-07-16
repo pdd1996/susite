@@ -93,7 +93,13 @@ erDiagram
 
 ## MySQL 集成测试
 
-设置独立的 `DATABASE_URL_TEST` 后运行 `pnpm --filter @zhansite/api test`。数据库名必须包含 `test`；测试会清空其中的 Phase 2 表、执行全部 migration，并验证 revision 1、乐观锁、Asset 外键、Deployment 幂等/查询和审计。可靠性变更还应在该库中验证多个 Worker 并发领取任务、租约过期恢复和 artifact 预留。未设置变量时该集成测试明确跳过，不会回退使用开发数据库。
+设置独立的 `DATABASE_URL_TEST` 后运行 `pnpm --filter @zhansite/api test`。数据库名必须包含 `test`；测试会清空其中的 Phase 2 表、执行全部 migration，并验证 revision 1、乐观锁、Asset 外键、Deployment 幂等/查询、审计、多 Worker 并发领取、Deployment 租约过期恢复和 Artifact 预留/过期恢复。未设置变量时该集成测试明确跳过，不会回退使用开发数据库。
+
+## Migration 运维与回滚
+
+Phase 2 migration 采用追加式执行，生产或受控预览环境升级前必须备份数据库，并先在结构一致的独立测试库依次演练 `0000`～`0003`。执行后核对 `assets`、`build_artifacts`、`deployments` 表、外键、唯一索引以及 `lease_expires_at` 字段，再启动 API 和 Worker。
+
+仓库不提供自动向下 migration。若 `0002` 或 `0003` 执行失败，应停止 API 与 Worker、保留原始错误和备份，修复后以前向 migration 恢复；不得在有业务写入后直接删除 Phase 2 表或租约字段。只有确认尚无 Phase 2 数据写入时，才可由运维人员依据备份和变更窗口人工撤销新增对象。已产生数据时回滚应用版本前，应先确认旧版本不会误读新状态；必要时保持数据库结构不变，仅停止新 Worker 并恢复应用。
 
 ## 后续扩展
 

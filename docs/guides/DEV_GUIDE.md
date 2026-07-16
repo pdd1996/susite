@@ -32,7 +32,7 @@ pnpm dev:admin
 ## MySQL 持久化模式
 
 1. 复制 `apps/api/.env.example` 的变量到本地环境；
-2. 建库后按顺序执行 `apps/api/drizzle/0000_phase1_baseline.sql`、`0001_add_site_foreign_keys.sql` 和 `0002_phase2_assets_and_preview.sql`；
+2. 建库后按顺序执行 `apps/api/drizzle/0000_phase1_baseline.sql`、`0001_add_site_foreign_keys.sql`、`0002_phase2_assets_and_preview.sql` 和 `0003_reliable_deployment_leases.sql`；
 3. 设置 `DATABASE_URL` 后启动 API。
 
 `DATABASE_URL` 未设置时只用于本地演示，进程退出后全部数据会丢失。
@@ -53,6 +53,8 @@ pnpm --filter @zhansite/api test
 真实预览所需变量见 `apps/api/.env.example`。OSS 配置必须完整，且启用 OSS 时 `UPLOAD_TOKEN_SECRET` 必须至少 32 个字符；部分配置或弱密钥会阻止 API 启动。只有 OSS 凭据、公开 Asset URL、`PLATFORM_DOMAIN`、泛域名 DNS、有效 HTTPS 证书及 CDN 路由全部就绪时，服务端才启用真实预览发布器；否则部署任务进入 `failed` 并记录 `preview_not_configured`。
 
 对象上传使用服务端生成的短时 PUT 签名。完成登记时服务端读取对象内容，校验实际 MIME/文件特征、大小并自行计算 SHA-256；PDF 还必须可解析且至少包含一页。通过后文件复制到不可变 Asset 路径；同一上传令牌重复完成时返回同一 Asset。
+
+受控预览环境应设置 `RUN_EMBEDDED_DEPLOYMENT_WORKER=false`，并在独立终端运行 `pnpm start:worker`。API 与 Worker 必须连接同一个 MySQL、OSS 和平台域名配置；本地开发可保留默认的内嵌 Worker。
 
 ## 使用指定 Revision 构建模板
 

@@ -4,7 +4,7 @@
 
 保持 `SiteRevision` 为不可变内容快照，新增独立的 `Asset`、`BuildArtifact` 和 `Deployment` 生命周期。浏览器只通过服务端签发的短时 OSS 直传凭据上传到由 `siteId`、上传会话和随机对象名限定的临时前缀；服务端在完成回调中读取对象元数据、校验文件特征与 checksum，并将通过复核的对象提升或复制到不可变 Asset 路径后登记。
 
-保存草稿 Revision 时，API 从配置中收集所有 Asset ID：尚不存在的预留 ID 可以保留，已存在的 Asset 必须属于当前 `siteId` 且与引用字段类型兼容。构建/预览前执行完整校验，要求全部引用存在、完成复核、归属同站、类型匹配且占位素材已批准。构建运行器以 `siteId/revision/templateVersion` 为输入构建，将静态包写入不可变 artifact 前缀；仅在平台预览基础设施条件满足且 HTTPS、关键路由及静态资源检查通过时返回预览 URL。部署和 artifact 均先由 Worker 原子领取并带有限期租约：启动后会扫描 queued 与过期任务，因此进程崩溃后的任务可恢复；artifact 在写入前已被预留，避免并发覆写同一路径。本地开发 Worker 随 API 启动，生产部署仍须将相同循环部署为独立进程或队列消费者。Phase 3 再补齐自动重试、原子切换、回滚和故障演练。
+保存草稿 Revision 时，API 从配置中收集所有 Asset ID：尚不存在的预留 ID 可以保留，已存在的 Asset 必须属于当前 `siteId` 且与引用字段类型兼容。构建/预览前执行完整校验，要求全部引用存在、完成复核、归属同站、类型匹配且占位素材已批准。构建运行器以 `siteId/revision/templateVersion` 为输入构建，将静态包写入不可变 artifact 前缀；仅在平台预览基础设施条件满足且 HTTPS、关键路由及静态资源检查通过时返回预览 URL。部署和 artifact 均先由 Worker 原子领取并带有限期租约：启动后会扫描 queued 与过期任务，因此进程崩溃后的任务可恢复；artifact 在写入前已被预留，避免并发覆写同一路径。本地开发默认由 API 内嵌轮询器处理，受控预览环境使用独立 Worker 进程消费同一数据库队列。Phase 3 再补齐自动重试、原子切换、回滚和故障演练。
 
 ## 数据与契约变化
 
@@ -99,14 +99,14 @@ Revision 创建 API 保持既有 `expectedRevision` 乐观并发语义。响应 
 
 ## 必须同步的长期文档
 
-- [ ] `README.md`：更新当前阶段与 Phase 2 活跃 Spec 入口。
-- [ ] `docs/展站计划.md`：更新 Phase 2 进展、素材状态和预览基础设施的事实状态。
-- [ ] `docs/展站-产品需求文档(PRD).md`：同步 Asset 规则、预览流程、接口/验收标准中的稳定结论。
-- [ ] `docs/guides/DATABASE.md`：增加 Asset、BuildArtifact、Deployment 结构、约束与 MySQL 集成测试说明。
-- [ ] `docs/guides/DEV_GUIDE.md`：增加 OSS/预览所需环境变量、本地运行和测试命令。
-- [ ] `docs/guides/DEPLOYMENT.md`：首次真实预览部署时新增，记录域名、DNS、证书、OSS/CDN、地域/备案与验证方式。
-- [ ] `deploy/README.md`：首次真实预览部署时新增，记录实际部署命令与运行入口。
-- [ ] `docs/jinyuan/README.md` 与 `docs/jinyuan/金源电器官网-产品需求文档(PRD).md`：同步真实素材清单、待确认项及批准占位项。
+- [x] `README.md`：更新当前阶段与 Phase 2 活跃 Spec 入口。
+- [x] `docs/展站计划.md`：更新 Phase 2 进展、素材状态和预览基础设施的事实状态。
+- [x] `docs/展站-产品需求文档(PRD).md`：同步 Asset 规则、预览流程、接口/验收标准中的稳定结论。
+- [x] `docs/guides/DATABASE.md`：增加 Asset、BuildArtifact、Deployment 结构、约束、migration 运维与 MySQL 集成测试说明。
+- [x] `docs/guides/DEV_GUIDE.md`：增加 OSS/预览所需环境变量、本地运行、独立 Worker 和测试命令。
+- [x] `docs/guides/DEPLOYMENT.md`：已新增并如实记录域名、DNS、证书、OSS/CDN、地域/备案的待验证状态。
+- [x] `deploy/README.md`：已新增并记录 migration、API 与独立 Worker 运行入口。
+- [x] `docs/jinyuan/README.md` 与 `docs/jinyuan/金源电器官网-产品需求文档(PRD).md`：同步真实素材清单、待确认项及批准占位项。
 
 ## 实施顺序
 

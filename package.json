@@ -11,6 +11,8 @@
     "check": "pnpm -r typecheck && pnpm -r test",
     "dev:admin": "pnpm --filter @zhansite/admin dev",
     "dev:api": "pnpm --filter @zhansite/api dev",
+    "dev:worker": "pnpm --filter @zhansite/api dev:worker",
+    "start:worker": "pnpm --filter @zhansite/api start:worker",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
   },

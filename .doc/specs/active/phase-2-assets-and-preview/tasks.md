@@ -47,7 +47,7 @@
 - [x] 定义 `revision + templateVersion` 的构建输入、artifact ID 与不可变产物目录，并在对象写入前以数据库唯一记录和租约原子预留
 - [x] 实现构建任务创建与状态查询 API
 - [x] 实现本地/测试异步构建运行器与适配器：读取已验证 Revision 和 Asset、构建模板并写入 artifact
-- [x] 接入持久化轮询 Worker：API 返回后由 Worker 原子领取任务；重启后可领取过期租约。生产仍待改为独立进程或队列消费者
+- [x] 接入持久化轮询 Worker：API 返回后由 Worker 原子领取任务；重启后可领取过期租约；提供独立 Worker 进程入口并允许 API 关闭内嵌消费者
 - [x] 实现 preview 部署适配器，返回真实 HTTPS URL 或明确的基础设施配置错误
 - [x] 实现部署幂等键，确保同一 artifact 内容不被覆盖，重复请求不产生重复有效任务
 - [x] 将部署状态、artifact、URL、占位 Asset 清单和安全错误摘要持久化

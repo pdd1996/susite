@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsx watch src/server.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "start:worker": "tsx src/worker.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

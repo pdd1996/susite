@@ -151,4 +151,71 @@ describeMySql("MySQL repository integration", () => {
       ])
     );
   });
+
+  it("claims deployments once and recovers expired deployment and artifact leases", async () => {
+    await repository.createSite(
+      { siteId: "mysql-lease-site", name: "MySQL 租约站点", template: "b2b-manufacturing-v1" },
+      config,
+      "mysql-worker"
+    );
+    const now = new Date().toISOString();
+    await repository.createDeployment({
+      deploymentId: "deployment_mysql_lease",
+      jobId: "job_mysql_lease",
+      siteId: "mysql-lease-site",
+      revision: 1,
+      environment: "preview",
+      idempotencyKey: "mysql-lease-idempotency",
+      status: "queued",
+      placeholderAssetIds: [],
+      createdBy: "mysql-worker",
+      createdAt: now,
+      updatedAt: now
+    });
+
+    const futureLease = new Date(Date.now() + 60_000).toISOString();
+    const concurrentClaims = await Promise.all([
+      repository.claimNextDeployment(futureLease),
+      repository.claimNextDeployment(futureLease)
+    ]);
+    expect(concurrentClaims.filter(Boolean)).toHaveLength(1);
+    expect(concurrentClaims.find(Boolean)).toMatchObject({
+      jobId: "job_mysql_lease",
+      status: "building"
+    });
+
+    await repository.updateDeployment("mysql-lease-site", "job_mysql_lease", {
+      status: "building",
+      leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+    });
+    await expect(repository.claimNextDeployment(futureLease)).resolves.toMatchObject({
+      jobId: "job_mysql_lease",
+      status: "building"
+    });
+
+    const artifact = {
+      artifactId: "artifact_mysql_lease",
+      siteId: "mysql-lease-site",
+      revision: 1,
+      template: "b2b-manufacturing-v1" as const,
+      templateVersion: "1.0.0",
+      inputChecksum: "c".repeat(64),
+      location: "artifacts/mysql-lease-site/r1/1.0.0/artifact_mysql_lease",
+      status: "building" as const,
+      createdBy: "mysql-worker",
+      createdAt: now
+    };
+    await expect(
+      repository.claimArtifact(artifact, new Date(Date.now() - 1_000).toISOString())
+    ).resolves.toMatchObject({ claimed: true });
+    await expect(repository.claimArtifact(artifact, futureLease)).resolves.toMatchObject({
+      claimed: true,
+      artifact: { artifactId: "artifact_mysql_lease", status: "building" }
+    });
+    await repository.markArtifactReady(artifact.artifactId);
+    await expect(repository.claimArtifact(artifact, futureLease)).resolves.toMatchObject({
+      claimed: false,
+      artifact: { status: "ready" }
+    });
+  });
 });
