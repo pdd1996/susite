@@ -29,6 +29,9 @@ RUN pnpm --filter @zhansite/admin build
 FROM nginx:1.28-alpine
 
 COPY deploy/nginx.ip-baseline.conf /etc/nginx/conf.d/default.conf
+COPY deploy/nginx-auth-entrypoint.sh /docker-entrypoint.d/10-zhansite-auth.sh
 COPY --from=build /app/apps/admin/dist /usr/share/nginx/html
+
+RUN chmod 755 /docker-entrypoint.d/10-zhansite-auth.sh
 
 EXPOSE 80
