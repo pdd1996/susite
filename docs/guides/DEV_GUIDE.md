@@ -1,4 +1,4 @@
-# 展站开发指南（Phase 3）
+# 展站开发指南（V1 本地交付闭环）
 
 ## 前置条件
 
@@ -12,6 +12,7 @@
 pnpm install
 pnpm acceptance:local
 pnpm acceptance:reliability
+pnpm acceptance:operations
 pnpm check
 pnpm build
 ```
@@ -19,6 +20,8 @@ pnpm build
 `pnpm acceptance:local` 使用受控内存仓库、真实模板生产构建和仅绑定 loopback 的独立静态 HTTP 服务连续执行 20 次部署。它断言每轮实际构建、全部任务为 `healthy`、P95 不超过 10 分钟、占位 Asset 的真实校验和、5 个静态路由及关键 JS/Logo 可通过 HTTP 读取；验收过程不启动 API 网络监听器。报告中的本地 HTTP URL 仅验证静态产物，不代表公网 TLS 已配置。
 
 `pnpm acceptance:reliability` 执行 AC-09/10/12 故障注入和 MySQL 集成：验证健康指针在候选失败和三次有界重试期间不变、事件日志清洗、回滚创建新 Deployment、跨站访问拒绝，以及 MySQL migration、并发激活和 lease fencing。MySQL 用例要求 `DATABASE_URL_TEST`；未配置时只执行内存可靠性用例并明确跳过数据库部分。
+
+`pnpm acceptance:operations` 执行 AC-13 本地交付闭环与 MySQL 集成：创建站点和 Revision，完成发布、预览发送、客户反馈、新 Revision、再发布、客户确认和 artifact 回滚；同时验证 `contentStatus`、ReviewRecord、AuditLog、migration、重启持久化、复合归属与跨站拒绝。
 
 ## 本地运行
 
@@ -32,6 +35,8 @@ pnpm dev:admin
 ```
 
 访问 `http://localhost:5173`。创建站点时初始 SiteConfig 会与站点、revision 1 和审计记录在同一事务中保存。后台默认请求 `http://localhost:8787`；可通过 `VITE_API_BASE_URL` 覆盖。
+
+后台的本地交付顺序为：创建/选择站点 → 保存配置 Revision → 创建并等待健康预览 → 记录预览已发送 → 记录客户反馈或确认。反馈会把该 Revision 内容状态恢复为 `draft`，实际修改仍必须保存为新的不可变 Revision；确认进入 `approved`。历史非当前 Revision 可归档，部署回滚仍从历史 ready artifact 发起。内容状态与 Deployment 状态互不替代。
 
 未配置 OSS 时，API 使用进程内对象存储并提供 `/local-uploads` 本地上传适配器，可验证签名、文件特征、SHA-256、Asset 归属和后台交互；该模式不生成或伪造 HTTPS 预览 URL。
 
@@ -61,7 +66,7 @@ pnpm --filter @zhansite/api test
 
 真实预览所需变量见 `apps/api/.env.example`。OSS 配置必须完整，且启用 OSS 时 `UPLOAD_TOKEN_SECRET` 必须至少 32 个字符；部分配置或弱密钥会阻止 API 启动。除 OSS 凭据、公开 Asset URL 和 `PLATFORM_DOMAIN` 外，还必须配置 `PREVIEW_RELEASE_HEALTH_BASE_URL`：该候选路由将不可变 `releases/` 前缀映射为 HTTP 站点以执行完整健康检查。缺少任一项时服务端使用不可用发布器，任务以 permanent `preview_not_configured` 失败且不改变已有健康指针。
 
-Phase 3 软件能力以 `pnpm acceptance:local`、`pnpm acceptance:reliability`、`pnpm check` 和 `pnpm build` 退出；真实 OSS、公网 DNS/TLS/CDN、云端 P95 和公网微信真机属于部署基础设施启用门槛。未通过这些门槛时可以开发和回归，但不得把 Mock URL 用作客户预览链接。
+V1 本地软件能力以 `pnpm acceptance:local`、`pnpm acceptance:reliability`、`pnpm acceptance:operations`、`pnpm check` 和 `pnpm build` 退出；真实 OSS、公网 DNS/TLS/CDN、云端 P95 和公网微信真机属于部署基础设施启用门槛。未通过这些门槛时可以开发和回归，但不得把 Mock URL 用作客户预览链接。
 
 对象上传使用服务端生成的短时 PUT 签名。完成登记时服务端读取对象内容，校验实际 MIME/文件特征、大小并自行计算 SHA-256；PDF 还必须可解析且至少包含一页。通过后文件复制到不可变 Asset 路径；同一上传令牌重复完成时返回同一 Asset。
 

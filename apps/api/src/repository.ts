@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { SiteConfig } from "@zhansite/site-config";
+
+export const contentStatuses = ["draft", "review_requested", "approved", "archived"] as const;
+export type ContentStatus = (typeof contentStatuses)[number];
 
 export type Site = {
   siteId: string;
@@ -12,6 +16,7 @@ export type SiteRevision = {
   revision: number;
   schemaVersion: "1.0";
   config: SiteConfig;
+  contentStatus: ContentStatus;
   createdBy: string;
   createdAt: string;
 };
@@ -129,6 +134,39 @@ export type AuditLog = {
   createdAt: string;
 };
 
+export const reviewKinds = ["preview_sent", "customer_feedback", "customer_confirmed"] as const;
+export type ReviewKind = (typeof reviewKinds)[number];
+export const reviewChannels = ["wechat", "phone", "email", "in_person", "other"] as const;
+export type ReviewChannel = (typeof reviewChannels)[number];
+export type ReviewOutcome = "pending" | "changes_requested" | "approved";
+
+export type ReviewRecord = {
+  reviewId: string;
+  siteId: string;
+  revision: number;
+  deploymentId: string;
+  kind: ReviewKind;
+  outcome: ReviewOutcome;
+  channel: ReviewChannel;
+  previewUrl: string;
+  note: string;
+  recordedBy: string;
+  recordedAt: string;
+};
+
+export type ReviewMutationResult =
+  | { kind: "created"; record: ReviewRecord; revision: SiteRevision }
+  | { kind: "site_not_found" | "revision_not_found" | "deployment_not_found" }
+  | { kind: "review_deployment_mismatch" }
+  | { kind: "status_conflict"; currentStatus: ContentStatus }
+  | { kind: "transition_invalid" };
+
+export type RevisionStatusMutationResult =
+  | { kind: "updated"; revision: SiteRevision }
+  | { kind: "site_not_found" | "revision_not_found" | "current_revision" }
+  | { kind: "status_conflict"; currentStatus: ContentStatus }
+  | { kind: "transition_invalid" };
+
 export type SiteRepository = {
   createSite(
     site: Omit<Site, "currentRevision">,
@@ -145,6 +183,23 @@ export type SiteRepository = {
     config: SiteConfig,
     actorId: string
   ): Promise<{ kind: "created"; revision: SiteRevision } | { kind: "conflict"; currentRevision: number } | { kind: "not_found" }>;
+  archiveRevision(
+    siteId: string,
+    revision: number,
+    expectedStatus: ContentStatus,
+    actorId: string
+  ): Promise<RevisionStatusMutationResult>;
+  createReviewRecord(input: {
+    siteId: string;
+    revision: number;
+    deploymentId: string;
+    kind: ReviewKind;
+    channel: ReviewChannel;
+    note: string;
+    expectedStatus: ContentStatus;
+    actorId: string;
+  }): Promise<ReviewMutationResult>;
+  listReviewRecords(siteId: string, revision?: number): Promise<ReviewRecord[]>;
   createAsset(asset: Asset): Promise<Asset>;
   listAssets(siteId: string): Promise<Asset[]>;
   getAssetsByIds(assetIds: string[]): Promise<Asset[]>;
@@ -211,6 +266,7 @@ export class InMemorySiteRepository implements SiteRepository {
   private readonly deployments = new Map<string, Deployment>();
   private readonly previewStates = new Map<string, SitePreviewState>();
   private readonly deploymentEvents = new Map<string, DeploymentEvent[]>();
+  private readonly reviews: ReviewRecord[] = [];
   private readonly audits: AuditLog[] = [];
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -230,6 +286,7 @@ export class InMemorySiteRepository implements SiteRepository {
       revision: 1,
       schemaVersion: "1.0",
       config: initialConfig,
+      contentStatus: "draft",
       createdBy: actorId,
       createdAt: new Date().toISOString()
     };
@@ -277,6 +334,7 @@ export class InMemorySiteRepository implements SiteRepository {
       revision: expectedRevision + 1,
       schemaVersion: "1.0",
       config,
+      contentStatus: "draft",
       createdBy: actorId,
       createdAt: new Date().toISOString()
     };
@@ -285,6 +343,107 @@ export class InMemorySiteRepository implements SiteRepository {
     this.revisions.get(siteId)?.push(revision);
     this.audit(actorId, "revision.created", siteId, `${siteId}:${revision.revision}`);
     return { kind: "created", revision };
+  }
+
+  async archiveRevision(
+    siteId: string,
+    revisionNumber: number,
+    expectedStatus: ContentStatus,
+    actorId: string
+  ): Promise<RevisionStatusMutationResult> {
+    const site = this.sites.get(siteId);
+    if (!site) return { kind: "site_not_found" };
+    const revision = this.revisions.get(siteId)?.find((item) => item.revision === revisionNumber);
+    if (!revision) return { kind: "revision_not_found" };
+    if (revisionNumber === site.currentRevision) return { kind: "current_revision" };
+    if (revision.contentStatus !== expectedStatus) {
+      return { kind: "status_conflict", currentStatus: revision.contentStatus };
+    }
+    if (revision.contentStatus === "archived") return { kind: "transition_invalid" };
+    revision.contentStatus = "archived";
+    this.audit(actorId, "revision.archived", siteId, `${siteId}:${revisionNumber}`);
+    return { kind: "updated", revision: { ...revision } };
+  }
+
+  async createReviewRecord(input: {
+    siteId: string;
+    revision: number;
+    deploymentId: string;
+    kind: ReviewKind;
+    channel: ReviewChannel;
+    note: string;
+    expectedStatus: ContentStatus;
+    actorId: string;
+  }): Promise<ReviewMutationResult> {
+    const site = this.sites.get(input.siteId);
+    if (!site) return { kind: "site_not_found" };
+    const revision = this.revisions
+      .get(input.siteId)
+      ?.find((item) => item.revision === input.revision);
+    if (!revision) return { kind: "revision_not_found" };
+    const deployment = [...this.deployments.values()].find(
+      (item) =>
+        item.deploymentId === input.deploymentId &&
+        item.siteId === input.siteId &&
+        item.revision === input.revision &&
+        item.status === "healthy" &&
+        Boolean(item.previewUrl)
+    );
+    if (!deployment) return { kind: "deployment_not_found" };
+    if (revision.contentStatus !== input.expectedStatus) {
+      return { kind: "status_conflict", currentStatus: revision.contentStatus };
+    }
+    const transitions: Record<ReviewKind, { from: ContentStatus; to: ContentStatus; outcome: ReviewOutcome }> = {
+      preview_sent: { from: "draft", to: "review_requested", outcome: "pending" },
+      customer_feedback: { from: "review_requested", to: "draft", outcome: "changes_requested" },
+      customer_confirmed: { from: "review_requested", to: "approved", outcome: "approved" }
+    };
+    const transition = transitions[input.kind];
+    if (revision.contentStatus !== transition.from) return { kind: "transition_invalid" };
+    if (input.kind !== "preview_sent") {
+      const sent = [...this.reviews]
+        .reverse()
+        .find(
+          (record) =>
+            record.siteId === input.siteId &&
+            record.revision === input.revision &&
+            record.kind === "preview_sent"
+        );
+      if (!sent || sent.deploymentId !== input.deploymentId) {
+        return { kind: "review_deployment_mismatch" };
+      }
+    }
+
+    const recordedAt = new Date(this.now()).toISOString();
+    const record: ReviewRecord = {
+      reviewId: `review_${randomUUID()}`,
+      siteId: input.siteId,
+      revision: input.revision,
+      deploymentId: input.deploymentId,
+      kind: input.kind,
+      outcome: transition.outcome,
+      channel: input.channel,
+      previewUrl: deployment.previewUrl!,
+      note: input.note,
+      recordedBy: input.actorId,
+      recordedAt
+    };
+    revision.contentStatus = transition.to;
+    this.reviews.push(record);
+    this.audit(input.actorId, "review.created", input.siteId, record.reviewId);
+    this.audit(
+      input.actorId,
+      `revision.status.${transition.to}`,
+      input.siteId,
+      `${input.siteId}:${input.revision}`
+    );
+    return { kind: "created", record, revision: { ...revision } };
+  }
+
+  async listReviewRecords(siteId: string, revision?: number): Promise<ReviewRecord[]> {
+    return this.reviews
+      .filter((record) => record.siteId === siteId && (revision === undefined || record.revision === revision))
+      .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
   }
 
   async createAsset(asset: Asset): Promise<Asset> {

@@ -12,6 +12,9 @@ import { InMemoryObjectStorage, type ObjectStorage } from "./object-storage.js";
 import {
   SiteAlreadyExistsError,
   assetTypes,
+  contentStatuses,
+  reviewChannels,
+  reviewKinds,
   type AssetSourceKind,
   type AssetType,
   type SiteRepository
@@ -117,6 +120,104 @@ export function createApp(repository: SiteRepository, options: AppOptions) {
       return context.json({ error: "revision_conflict", currentRevision: result.currentRevision }, 409);
     }
     return context.json(result.revision, 201);
+  });
+
+  const archiveRevisionSchema = z.strictObject({
+    expectedStatus: z.enum(contentStatuses)
+  });
+  app.post("/sites/:siteId/revisions/:revision/archive", async (context) => {
+    const siteId = context.req.param("siteId");
+    const revision = Number(context.req.param("revision"));
+    const parsed = archiveRevisionSchema.safeParse(await context.req.json());
+    if (!Number.isInteger(revision) || revision < 1 || !parsed.success) {
+      return context.json(
+        {
+          error: "validation_failed",
+          ...(!parsed.success ? { issues: parsed.error.issues } : {})
+        },
+        400
+      );
+    }
+    const result = await repository.archiveRevision(
+      siteId,
+      revision,
+      parsed.data.expectedStatus,
+      options.actorId
+    );
+    if (result.kind === "updated") return context.json(result.revision);
+    if (result.kind === "status_conflict") {
+      return context.json(
+        { error: "review_status_conflict", currentStatus: result.currentStatus },
+        409
+      );
+    }
+    if (result.kind === "current_revision") {
+      return context.json({ error: "current_revision_cannot_be_archived" }, 400);
+    }
+    if (result.kind === "transition_invalid") {
+      return context.json({ error: "review_transition_invalid" }, 400);
+    }
+    if (result.kind === "revision_not_found" && await repository.getSite(siteId)) {
+      await repository.recordAudit(options.actorId, "security.scope_denied", siteId, "revision");
+    }
+    return context.json(
+      { error: result.kind === "site_not_found" ? "site_not_found" : "revision_not_found" },
+      404
+    );
+  });
+
+  const createReviewSchema = z.strictObject({
+    revision: z.number().int().positive(),
+    deploymentId: z.string().trim().min(1).max(110),
+    kind: z.enum(reviewKinds),
+    channel: z.enum(reviewChannels),
+    note: z.string().trim().max(2000).default(""),
+    expectedStatus: z.enum(contentStatuses)
+  });
+  app.get("/sites/:siteId/reviews", async (context) => {
+    const siteId = context.req.param("siteId");
+    if (!(await repository.getSite(siteId))) return context.json({ error: "site_not_found" }, 404);
+    const revisionQuery = context.req.query("revision");
+    const revision = revisionQuery === undefined ? undefined : Number(revisionQuery);
+    if (revision !== undefined && (!Number.isInteger(revision) || revision < 1)) {
+      return context.json({ error: "validation_failed" }, 400);
+    }
+    return context.json(await repository.listReviewRecords(siteId, revision));
+  });
+  app.post("/sites/:siteId/reviews", async (context) => {
+    const siteId = context.req.param("siteId");
+    const parsed = createReviewSchema.safeParse(await context.req.json());
+    if (!parsed.success) {
+      return context.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+    }
+    const result = await repository.createReviewRecord({
+      siteId,
+      ...parsed.data,
+      actorId: options.actorId
+    });
+    if (result.kind === "created") return context.json(result, 201);
+    if (result.kind === "status_conflict") {
+      return context.json(
+        { error: "review_status_conflict", currentStatus: result.currentStatus },
+        409
+      );
+    }
+    if (result.kind === "transition_invalid") {
+      return context.json({ error: "review_transition_invalid" }, 400);
+    }
+    if (result.kind === "review_deployment_mismatch") {
+      return context.json({ error: "review_deployment_mismatch" }, 400);
+    }
+    if (result.kind !== "site_not_found" && await repository.getSite(siteId)) {
+      await repository.recordAudit(options.actorId, "security.scope_denied", siteId, "review");
+    }
+    return context.json({ error: result.kind }, 404);
+  });
+
+  app.get("/sites/:siteId/audit-logs", async (context) => {
+    const siteId = context.req.param("siteId");
+    if (!(await repository.getSite(siteId))) return context.json({ error: "site_not_found" }, 404);
+    return context.json(await repository.getAuditLogs(siteId));
   });
 
   const signUploadSchema = z.strictObject({

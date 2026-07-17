@@ -40,6 +40,7 @@ describeMySql("MySQL repository integration", () => {
   }
   const repository = createMySqlRepository(databaseUrl);
   const tables = [
+    "review_records",
     "deployment_events",
     "site_preview_states",
     "deployments",
@@ -198,6 +199,113 @@ describeMySql("MySQL repository integration", () => {
         idempotencyKey: "cross-artifact"
       })
     ).rejects.toBeTruthy();
+  });
+
+  it("persists review records and atomically protects content status across sites", async () => {
+    for (const siteId of ["review-mysql", "other-mysql"]) {
+      await repository.createSite(
+        { siteId, name: siteId, template: "b2b-manufacturing-v1" },
+        config,
+        "mysql-operator"
+      );
+    }
+    const now = new Date().toISOString();
+    await repository.createDeployment({
+      deploymentId: "deployment_review_mysql",
+      jobId: "job_review_mysql",
+      siteId: "review-mysql",
+      revision: 1,
+      kind: "publish",
+      environment: "preview",
+      idempotencyKey: "review-mysql",
+      status: "healthy",
+      placeholderAssetIds: [],
+      previewUrl: "https://review-mysql.preview.example.test",
+      createdBy: "mysql-operator",
+      createdAt: now,
+      updatedAt: now
+    });
+    await repository.createDeployment({
+      deploymentId: "deployment_review_mysql_other",
+      jobId: "job_review_mysql_other",
+      siteId: "review-mysql",
+      revision: 1,
+      kind: "publish",
+      environment: "preview",
+      idempotencyKey: "review-mysql-other",
+      status: "healthy",
+      placeholderAssetIds: [],
+      previewUrl: "https://review-mysql.preview.example.test",
+      createdBy: "mysql-operator",
+      createdAt: now,
+      updatedAt: now
+    });
+
+    await expect(
+      repository.createReviewRecord({
+        siteId: "other-mysql",
+        revision: 1,
+        deploymentId: "deployment_review_mysql",
+        kind: "preview_sent",
+        channel: "wechat",
+        note: "跨站请求",
+        expectedStatus: "draft",
+        actorId: "mysql-operator"
+      })
+    ).resolves.toEqual({ kind: "deployment_not_found" });
+    await expect(
+      repository.createReviewRecord({
+        siteId: "review-mysql",
+        revision: 1,
+        deploymentId: "deployment_review_mysql",
+        kind: "preview_sent",
+        channel: "wechat",
+        note: "已发送客户",
+        expectedStatus: "draft",
+        actorId: "mysql-operator"
+      })
+    ).resolves.toMatchObject({
+      kind: "created",
+      record: { outcome: "pending" },
+      revision: { contentStatus: "review_requested" }
+    });
+    await expect(
+      repository.createReviewRecord({
+        siteId: "review-mysql",
+        revision: 1,
+        deploymentId: "deployment_review_mysql_other",
+        kind: "customer_confirmed",
+        channel: "phone",
+        note: "错误关联",
+        expectedStatus: "review_requested",
+        actorId: "mysql-operator"
+      })
+    ).resolves.toEqual({ kind: "review_deployment_mismatch" });
+    await expect(
+      repository.createReviewRecord({
+        siteId: "review-mysql",
+        revision: 1,
+        deploymentId: "deployment_review_mysql",
+        kind: "customer_confirmed",
+        channel: "phone",
+        note: "确认通过",
+        expectedStatus: "draft",
+        actorId: "mysql-operator"
+      })
+    ).resolves.toMatchObject({ kind: "status_conflict", currentStatus: "review_requested" });
+
+    const reopened = createMySqlRepository(databaseUrl);
+    await expect(reopened.getRevision("review-mysql", 1)).resolves.toMatchObject({
+      contentStatus: "review_requested"
+    });
+    await expect(reopened.listReviewRecords("review-mysql", 1)).resolves.toEqual([
+      expect.objectContaining({
+        kind: "preview_sent",
+        deploymentId: "deployment_review_mysql",
+        recordedBy: "mysql-operator"
+      })
+    ]);
+    await reopened.close?.();
   });
 
   it("claims deployments once and recovers expired deployment and artifact leases", async () => {
@@ -424,7 +532,7 @@ describeMySql("MySQL repository integration", () => {
     const [migrations] = await pool.query<RowDataPacket[]>(
       "SELECT filename, checksum_sha256 FROM `_zhansite_migrations` ORDER BY filename"
     );
-    expect(migrations).toHaveLength(6);
+    expect(migrations).toHaveLength(7);
     const [constraints] = await pool.query<RowDataPacket[]>(
       `SELECT constraint_name
          FROM information_schema.table_constraints
@@ -436,10 +544,12 @@ describeMySql("MySQL repository integration", () => {
             'assets_source_approval_ck',
             'site_preview_states_artifact_fk',
             'site_preview_states_deployment_fk',
-            'deployment_events_deployment_fk'
+            'deployment_events_deployment_fk',
+            'review_records_revision_fk',
+            'review_records_deployment_fk'
           )`
     );
-    expect(constraints).toHaveLength(7);
+    expect(constraints).toHaveLength(9);
     const [indexes] = await pool.query<RowDataPacket[]>(
       `SELECT DISTINCT index_name
          FROM information_schema.statistics
@@ -448,10 +558,12 @@ describeMySql("MySQL repository integration", () => {
             'deployments_claim_idx',
             'audit_logs_site_created_idx',
             'deployment_events_order_uq',
-            'site_preview_states_identity_uq'
+            'site_preview_states_identity_uq',
+            'deployments_review_identity_uq',
+            'review_records_revision_recorded_idx'
           )`
     );
-    expect(indexes).toHaveLength(4);
+    expect(indexes).toHaveLength(6);
     await pool.end();
   });
 });

@@ -1,4 +1,4 @@
-# Phase 3 预览部署运行入口
+# V1 本地交付闭环运行入口
 
 ## 本地验证
 
@@ -6,6 +6,7 @@
 $env:DEV_ACTOR_ID="local-operator"
 pnpm acceptance:local
 pnpm acceptance:reliability
+pnpm acceptance:operations
 
 # 交互运行
 $env:DEV_ACTOR_ID="local-operator"
@@ -13,7 +14,7 @@ pnpm dev:api
 pnpm dev:admin
 ```
 
-`pnpm acceptance:local` 保留真实模板构建和独立 loopback 静态 HTTP 证据；`pnpm acceptance:reliability` 验证 AC-09/10/12、重试、事件、回滚和 MySQL 原子激活。交互运行未配置 OSS 时使用进程内适配器，重启后数据丢失，本地 URL 不可作为公网预览链接。
+`pnpm acceptance:local` 保留真实模板构建和独立 loopback 静态 HTTP 证据；`pnpm acceptance:reliability` 验证 AC-09/10/12、重试、事件、回滚和 MySQL 原子激活；`pnpm acceptance:operations` 验证 AC-13 的创建、发布、审核、反馈、修改、确认、回滚以及 ReviewRecord/MySQL 隔离。交互运行未配置 OSS 时使用进程内适配器，重启后数据丢失，本地 URL 不可作为公网预览链接。
 
 ## MySQL
 
@@ -25,7 +26,7 @@ pnpm --filter @zhansite/api db:migrate
 
 统一迁移器会执行全部 migration 并登记 checksum。集成测试必须使用库名以 `_test` 结尾的独立 `DATABASE_URL_TEST`。
 
-Phase 3 对应 `0005_phase3_local_reliability.sql`，新增 preview pointer、部署事件、重试字段和复合归属约束。升级后必须先完成 `pnpm acceptance:reliability`，再启动 Worker。
+Phase 3 对应 `0005_phase3_local_reliability.sql`，V1 本地交付闭环对应 `0006_v1_local_operations_closure.sql`，后者增加 Revision 内容状态、ReviewRecord 和同站 Revision/Deployment 复合归属约束。升级后必须先完成 `pnpm acceptance:reliability` 与 `pnpm acceptance:operations`，再启动 Worker。
 
 ## 真实预览
 

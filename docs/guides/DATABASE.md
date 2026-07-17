@@ -1,8 +1,8 @@
-# 展站 MySQL 8 数据库设计与运维（Phase 3）
+# 展站 MySQL 8 数据库设计与运维（V1 本地交付闭环）
 
 ## 范围
 
-Phase 3 在既有不可变配置、素材和构建产物上增加原子预览指针、部署重试调度、阶段事件和回滚任务。本文同时规定 MySQL 物理结构、本机从零建库、迁移与验收契约。
+当前基线包含不可变配置、素材和构建产物、原子预览指针、部署重试/事件/回滚，以及 Revision 内容状态和追加式客户审核留痕。本文同时规定 MySQL 物理结构、本机从零建库、迁移与验收契约。
 
 ## MySQL 运行契约
 
@@ -23,6 +23,7 @@ Phase 3 在既有不可变配置、素材和构建产物上增加原子预览指
 - 可靠任务 migration：`apps/api/drizzle/0003_reliable_deployment_leases.sql`
 - 数据库可靠性 migration：`apps/api/drizzle/0004_database_reliability.sql`
 - Phase 3 可靠性 migration：`apps/api/drizzle/0005_phase3_local_reliability.sql`
+- V1 本地交付闭环 migration：`apps/api/drizzle/0006_v1_local_operations_closure.sql`
 - 统一迁移器：`apps/api/src/migrations.ts`、`apps/api/src/migrate.ts`
 - 配置字段契约：[SiteConfig v1 Schema](../schemas/site-config-v1.schema.json)
 
@@ -74,6 +75,8 @@ erDiagram
     build_artifacts ||--o{ deployments : published_as
     build_artifacts ||--o{ site_preview_states : active
     deployments ||--o{ deployment_events : records
+    site_revisions ||--o{ review_records : reviewed_by
+    deployments ||--o{ review_records : preview_source
     deployments ||--o{ site_preview_states : activated_by
 
     sites {
@@ -88,6 +91,7 @@ erDiagram
         int revision
         varchar schema_version
         json config
+        varchar content_status
         varchar created_by
     }
     audit_logs {
@@ -151,6 +155,19 @@ erDiagram
         varchar code
         varchar message
     }
+    review_records {
+        varchar review_id PK
+        varchar site_id
+        int revision
+        varchar deployment_id
+        varchar kind
+        varchar outcome
+        varchar channel
+        varchar preview_url
+        varchar note
+        varchar recorded_by
+        timestamp recorded_at
+    }
 ```
 
 ## 物理表说明
@@ -168,6 +185,7 @@ erDiagram
 - `site_id varchar(80)`、`revision int`：业务版本键，唯一索引为 `(site_id, revision)`，并外键引用 `sites`。
 - `schema_version varchar(20)`：配置契约版本。
 - `config json`：不可变 SiteConfig 快照；JSON 业务结构由服务端 Zod/JSON Schema 校验。
+- `content_status varchar(30)`：审核工作流元数据，只允许 `draft / review_requested / approved / archived`；不改变配置快照不可变性。
 - `created_by varchar(100)`、`created_at timestamp`：创建审计信息。
 
 ### `audit_logs`
@@ -222,12 +240,22 @@ erDiagram
 - 保存 stage、level、稳定 code、清洗后的 message 和时间；不保存凭据、签名 URL 或原始堆栈。
 - `(deployment_id, site_id)` 复合外键阻止跨站日志关联。
 
+### `review_records`
+
+- 记录只追加，不提供更新或删除路径；`review_id` 为主键。
+- `(site_id, revision)` 复合外键绑定审核对象；`(deployment_id, site_id, revision)` 复合外键保证引用的预览 Deployment 与 Revision 同站且同版本。
+- `kind` 只允许 `preview_sent / customer_feedback / customer_confirmed`，并分别约束 outcome 为 `pending / changes_requested / approved`。
+- `channel` 只允许 `wechat / phone / email / in_person / other`；preview URL 从 healthy Deployment 复制，客户端不能伪造。
+- 审核事务锁定 Revision，校验 `expectedStatus` 后同时插入记录、条件更新 `content_status` 并写 AuditLog；任一步失败整体回滚。
+- `(site_id, recorded_at)` 与 `(site_id, revision, recorded_at)` 支持站点和版本审核时间线。
+
 所有业务外键使用 `ON UPDATE CASCADE ON DELETE RESTRICT`。Phase 2 不提供站点物理删除；需要下线或数据保留策略时应先设计软删除/归档流程。
 
 ## 关键约束
 
 - `sites.site_id` 是站点的稳定身份。
 - `site_revisions` 的 `(site_id, revision)` 唯一；已创建的配置版本不可更新。
+- 新 Revision 固定从 `draft` 开始；内容状态迁移与 Deployment 状态正交，`archived` 为终态。
 - `site_revisions.site_id` 与 `audit_logs.site_id` 通过外键引用 `sites.site_id`，禁止产生孤立记录。
 - 创建 Revision 时在一个事务中锁定站点行，并比较 `expectedRevision` 与 `current_revision`；不一致时 API 返回 `409 revision_conflict`。
 - `audit_logs` 记录站点与版本创建操作。
@@ -242,7 +270,7 @@ erDiagram
 
 ## MySQL 集成测试
 
-设置独立的 `DATABASE_URL_TEST` 后运行 `pnpm acceptance:reliability`。数据库名必须以 `_test` 结尾；测试会清空业务表和 migration journal，执行全部 migration，并验证复合外键、并发原子激活、版本冲突、过期 lease fencing、事件顺序和跨站约束。未设置变量时 MySQL 用例明确跳过，不会回退使用开发数据库。
+设置独立的 `DATABASE_URL_TEST` 后运行 `pnpm acceptance:operations`。数据库名必须以 `_test` 结尾；测试会清空业务表和 migration journal，执行全部 migration，并验证 ReviewRecord 持久化/跨站约束，以及原有复合外键、并发原子激活、版本冲突、过期 lease fencing 和事件顺序。未设置变量时 MySQL 用例明确跳过，不会回退使用开发数据库。
 
 ## Migration 运维与回滚
 
@@ -260,4 +288,4 @@ pnpm --filter @zhansite/api db:migrate --baseline-existing
 
 ## 后续扩展
 
-真实云发布、CDN 对 active pointer 的路由适配和生产环境 promote 属于后续基础设施/Phase 4，不能用本地可靠性结果替代。
+真实云发布、CDN 对 active pointer 的路由适配和生产环境 promote 属于后续基础设施/Phase 4；`approved` 内容也不等于已完成正式发布。

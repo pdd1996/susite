@@ -33,10 +33,17 @@ export const siteRevisions = mysqlTable(
     revision: int("revision").notNull(),
     schemaVersion: varchar("schema_version", { length: 20 }).notNull(),
     config: json("config").$type<SiteConfig>().notNull(),
+    contentStatus: varchar("content_status", { length: 30 }).notNull().default("draft"),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     createdAt: timestamp("created_at").notNull().defaultNow()
   },
-  (table) => [uniqueIndex("site_revisions_site_revision_uq").on(table.siteId, table.revision)]
+  (table) => [
+    uniqueIndex("site_revisions_site_revision_uq").on(table.siteId, table.revision),
+    check(
+      "site_revisions_content_status_ck",
+      sql`${table.contentStatus} IN ('draft', 'review_requested', 'approved', 'archived')`
+    )
+  ]
 );
 
 export const auditLogs = mysqlTable(
@@ -171,6 +178,11 @@ export const deployments = mysqlTable(
       table.idempotencyKey
     ),
     uniqueIndex("deployments_identity_uq").on(table.deploymentId, table.siteId),
+    uniqueIndex("deployments_review_identity_uq").on(
+      table.deploymentId,
+      table.siteId,
+      table.revision
+    ),
     index("deployments_site_created_idx").on(table.siteId, table.createdAt),
     index("deployments_claim_idx").on(table.status, table.leaseExpiresAt, table.createdAt),
     foreignKey({
@@ -264,5 +276,58 @@ export const deploymentEvents = mysqlTable(
       foreignColumns: [deployments.deploymentId, deployments.siteId]
     }).onUpdate("cascade").onDelete("restrict"),
     check("deployment_events_level_ck", sql`${table.level} IN ('info', 'warn', 'error')`)
+  ]
+);
+
+export const reviewRecords = mysqlTable(
+  "review_records",
+  {
+    reviewId: varchar("review_id", { length: 110 }).primaryKey(),
+    siteId: varchar("site_id", { length: 80 }).notNull(),
+    revision: int("revision").notNull(),
+    deploymentId: varchar("deployment_id", { length: 110 }).notNull(),
+    kind: varchar("kind", { length: 30 }).notNull(),
+    outcome: varchar("outcome", { length: 30 }).notNull(),
+    channel: varchar("channel", { length: 30 }).notNull(),
+    previewUrl: varchar("preview_url", { length: 2048 }).notNull(),
+    note: varchar("note", { length: 2000 }).notNull().default(""),
+    recordedBy: varchar("recorded_by", { length: 100 }).notNull(),
+    recordedAt: timestamp("recorded_at").notNull().defaultNow()
+  },
+  (table) => [
+    index("review_records_site_recorded_idx").on(table.siteId, table.recordedAt),
+    index("review_records_revision_recorded_idx").on(
+      table.siteId,
+      table.revision,
+      table.recordedAt
+    ),
+    foreignKey({
+      name: "review_records_revision_fk",
+      columns: [table.siteId, table.revision],
+      foreignColumns: [siteRevisions.siteId, siteRevisions.revision]
+    }).onUpdate("cascade").onDelete("restrict"),
+    foreignKey({
+      name: "review_records_deployment_fk",
+      columns: [table.deploymentId, table.siteId, table.revision],
+      foreignColumns: [deployments.deploymentId, deployments.siteId, deployments.revision]
+    }).onUpdate("cascade").onDelete("restrict"),
+    check(
+      "review_records_kind_ck",
+      sql`${table.kind} IN ('preview_sent', 'customer_feedback', 'customer_confirmed')`
+    ),
+    check(
+      "review_records_outcome_ck",
+      sql`${table.outcome} IN ('pending', 'changes_requested', 'approved')`
+    ),
+    check(
+      "review_records_channel_ck",
+      sql`${table.channel} IN ('wechat', 'phone', 'email', 'in_person', 'other')`
+    ),
+    check(
+      "review_records_kind_outcome_ck",
+      sql`(${table.kind} = 'preview_sent' AND ${table.outcome} = 'pending')
+        OR (${table.kind} = 'customer_feedback' AND ${table.outcome} = 'changes_requested')
+        OR (${table.kind} = 'customer_confirmed' AND ${table.outcome} = 'approved')`
+    )
   ]
 );

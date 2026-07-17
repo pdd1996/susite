@@ -33,6 +33,7 @@ type Revision = {
   revision: number;
   schemaVersion: string;
   config: SiteConfig;
+  contentStatus: "draft" | "review_requested" | "approved" | "archived";
   createdBy: string;
   createdAt: string;
 };
@@ -45,6 +46,7 @@ type Asset = {
   originalFilename: string;
 };
 type Deployment = {
+  deploymentId?: string;
   jobId: string;
   revision: number;
   status: string;
@@ -58,6 +60,18 @@ type Deployment = {
   placeholderAssetIds: string[];
   previewUrl?: string;
   errorSummary?: string;
+};
+type ReviewRecord = {
+  reviewId: string;
+  revision: number;
+  deploymentId: string;
+  kind: "preview_sent" | "customer_feedback" | "customer_confirmed";
+  outcome: "pending" | "changes_requested" | "approved";
+  channel: "wechat" | "phone" | "email" | "in_person" | "other";
+  previewUrl: string;
+  note: string;
+  recordedBy: string;
+  recordedAt: string;
 };
 type PreviewState = {
   activeArtifactId: string;
@@ -134,6 +148,9 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
   const [deploymentEvents, setDeploymentEvents] = useState<DeploymentEvent[]>([]);
   const [reliabilityError, setReliabilityError] = useState("");
   const [deploymentEventsError, setDeploymentEventsError] = useState("");
+  const [reviews, setReviews] = useState<ReviewRecord[]>([]);
+  const [reviewChannel, setReviewChannel] = useState<ReviewRecord["channel"]>("wechat");
+  const [reviewNote, setReviewNote] = useState("");
   const activeSiteIdRef = useRef(siteId);
 
   const request = (path: string, init?: RequestInit) => fetch(`${apiBaseUrl}${path}`, init);
@@ -155,6 +172,13 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
     const history: Revision[] = await response.json();
     if (activeSiteIdRef.current === selectedSiteId) setRevisions(history);
     return history;
+  };
+  const loadReviews = async (selectedSiteId: string) => {
+    const response = await request(`/sites/${selectedSiteId}/reviews`);
+    if (!response.ok) throw new Error("无法读取审核记录。");
+    const loaded: ReviewRecord[] = await response.json();
+    if (activeSiteIdRef.current === selectedSiteId) setReviews(loaded);
+    return loaded;
   };
   const loadPreviewState = async (selectedSiteId: string) => {
     const response = await request(`/sites/${selectedSiteId}/preview-state`);
@@ -208,11 +232,15 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
     setPreviewState(undefined);
     setReadyArtifacts([]);
     setReliabilityError("");
+    setReviews([]);
     const history = await loadHistory(site.siteId);
     if (activeSiteIdRef.current !== site.siteId) return;
     if (history[0]) applyRevision(history[0]);
     await loadAssets(site.siteId);
     await loadReliability(site.siteId);
+    await loadReviews(site.siteId).catch(() => {
+      if (activeSiteIdRef.current === site.siteId) setReviews([]);
+    });
   };
 
   const createSite = async () => {
@@ -408,9 +436,60 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
     setMessage(`回滚任务已创建：${payload.jobId}`);
   };
 
+  const selectedRevision = revisions.find((revision) => revision.revision === sourceRevision);
+  const latestRevisionNumber = revisions[0]?.revision;
+  const latestReview = [...reviews]
+    .reverse()
+    .find((review) => review.revision === sourceRevision);
+  const recordReview = async (kind: ReviewRecord["kind"]) => {
+    if (!selectedRevision) return setMessage("请先选择 Revision。");
+    const deploymentId =
+      kind === "preview_sent"
+        ? deployment?.deploymentId ??
+          (previewState?.revision === sourceRevision ? previewState.activeDeploymentId : undefined)
+        : latestReview?.deploymentId;
+    if (!deploymentId) return setMessage("没有可用于本次审核的健康预览记录。");
+    const response = await request(`/sites/${siteId}/reviews`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: sourceRevision,
+        deploymentId,
+        kind,
+        channel: reviewChannel,
+        note: reviewNote,
+        expectedStatus: selectedRevision.contentStatus
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      if (payload.error === "review_status_conflict") {
+        await loadHistory(siteId);
+        return setMessage(`审核状态冲突：服务器当前为 ${payload.currentStatus}。`);
+      }
+      return setMessage(`审核记录失败：${payload.error}`);
+    }
+    setReviewNote("");
+    await Promise.all([loadHistory(siteId), loadReviews(siteId)]);
+    setMessage(`已记录审核动作：${kind}`);
+  };
+
+  const archiveRevision = async (revision: Revision) => {
+    if (!window.confirm(`确认归档 revision ${revision.revision}？归档后只能基于其内容创建新版本。`)) return;
+    const response = await request(`/sites/${siteId}/revisions/${revision.revision}/archive`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedStatus: revision.contentStatus })
+    });
+    const payload = await response.json();
+    if (!response.ok) return setMessage(`归档失败：${payload.error}`);
+    await loadHistory(siteId);
+    setMessage(`revision ${revision.revision} 已归档。`);
+  };
+
   return (
     <main style={{ fontFamily: "Arial, 'Microsoft YaHei', sans-serif", margin: "40px auto", maxWidth: 920 }}>
-      <h1>展站运营后台 · Phase 3 本地可靠性</h1>
+      <h1>展站运营后台 · V1 本地交付闭环</h1>
       <label>Site ID <input value={siteId} onChange={(event) => setSiteId(event.target.value)} /></label>
       <label>
         SiteConfig JSON
@@ -444,8 +523,11 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
       <ol>
         {revisions.map((revision) => (
           <li key={revision.revision}>
-            revision {revision.revision} · {revision.createdBy} · {revision.createdAt}
+            revision {revision.revision} · {revision.contentStatus ?? "draft"} · {revision.createdBy} · {revision.createdAt}
             <button onClick={() => loadHistoricalRevision(revision)}>加载此版本</button>
+            {revision.revision !== latestRevisionNumber && revision.contentStatus !== "archived" ? (
+              <button onClick={() => void archiveRevision(revision)}>归档此版本</button>
+            ) : null}
           </li>
         ))}
       </ol>
@@ -484,6 +566,7 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
 
       <h2>HTTPS 预览</h2>
       <p>当前内容来源：revision {sourceRevision}；保存基线：revision {baseRevision}</p>
+      <p>内容状态：{selectedRevision?.contentStatus ?? "未加载"}</p>
       <section aria-label="当前健康版本">
         <h3>当前健康版本</h3>
         {reliabilityError ? <p role="alert">{reliabilityError}</p> : null}
@@ -551,6 +634,68 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
             </li>
           ))}
         </ul>
+      )}
+      <h2>客户审核留痕</h2>
+      <label>
+        确认渠道
+        <select
+          aria-label="审核渠道"
+          value={reviewChannel}
+          onChange={(event) => setReviewChannel(event.target.value as ReviewRecord["channel"])}
+        >
+          <option value="wechat">微信</option>
+          <option value="phone">电话</option>
+          <option value="email">邮件</option>
+          <option value="in_person">当面</option>
+          <option value="other">其他</option>
+        </select>
+      </label>
+      <label>
+        审核备注
+        <textarea
+          aria-label="审核备注"
+          maxLength={2000}
+          value={reviewNote}
+          onChange={(event) => setReviewNote(event.target.value)}
+        />
+      </label>
+      <div>
+        <button
+          disabled={
+            selectedRevision?.contentStatus !== "draft" ||
+            !(
+              (deployment?.status === "healthy" &&
+                deployment.revision === sourceRevision &&
+                deployment.deploymentId) ||
+              (previewState?.revision === sourceRevision && previewState.activeDeploymentId)
+            )
+          }
+          onClick={() => void recordReview("preview_sent")}
+        >
+          记录预览已发送
+        </button>
+        <button
+          disabled={selectedRevision?.contentStatus !== "review_requested" || !latestReview}
+          onClick={() => void recordReview("customer_feedback")}
+        >
+          记录客户反馈
+        </button>
+        <button
+          disabled={selectedRevision?.contentStatus !== "review_requested" || !latestReview}
+          onClick={() => void recordReview("customer_confirmed")}
+        >
+          记录客户确认
+        </button>
+      </div>
+      {reviews.length === 0 ? <p>暂无审核记录。</p> : (
+        <ol aria-label="审核时间线">
+          {reviews.map((review) => (
+            <li key={review.reviewId}>
+              revision {review.revision} · {review.kind} · {review.outcome} · {review.channel} ·
+              {review.note || "无备注"} · {review.recordedBy} · {review.recordedAt}
+            </li>
+          ))}
+        </ol>
       )}
     </main>
   );

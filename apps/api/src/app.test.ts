@@ -82,6 +82,118 @@ describe("Phase 1 site API", () => {
     expect(revision.createdBy).toBe("trusted-operator");
   });
 
+  it("records the complete local review workflow with status and audit history", async () => {
+    const repository = new InMemorySiteRepository();
+    const app = createApp(repository, { actorId: "trusted-operator" });
+    await app.request("/sites", {
+      method: "POST",
+      body: JSON.stringify({
+        siteId: "review-site",
+        name: "审核站点",
+        template: "b2b-manufacturing-v1",
+        config
+      })
+    });
+    const now = new Date().toISOString();
+    const addHealthyDeployment = (revision: number, suffix: string) =>
+      repository.createDeployment({
+        deploymentId: `deployment_${suffix}`,
+        jobId: `job_${suffix}`,
+        siteId: "review-site",
+        revision,
+        kind: "publish",
+        environment: "preview",
+        idempotencyKey: suffix,
+        status: "healthy",
+        placeholderAssetIds: [],
+        previewUrl: "https://review-site.preview.example.test",
+        createdBy: "trusted-operator",
+        createdAt: now,
+        updatedAt: now
+      });
+    await addHealthyDeployment(1, "r1");
+    await addHealthyDeployment(1, "r1-other");
+
+    const review = (
+      revision: number,
+      deploymentId: string,
+      kind: string,
+      expectedStatus: string,
+      note: string
+    ) =>
+      app.request("/sites/review-site/reviews", {
+        method: "POST",
+        body: JSON.stringify({
+          revision,
+          deploymentId,
+          kind,
+          channel: "wechat",
+          note,
+          expectedStatus
+        })
+      });
+
+    expect((await review(1, "deployment_r1", "preview_sent", "draft", "已发送")).status).toBe(201);
+    expect((await repository.getRevision("review-site", 1))?.contentStatus).toBe("review_requested");
+    const mismatchedPreview = await review(
+      1,
+      "deployment_r1-other",
+      "customer_feedback",
+      "review_requested",
+      "错误关联"
+    );
+    expect(mismatchedPreview.status).toBe(400);
+    await expect(mismatchedPreview.json()).resolves.toEqual({
+      error: "review_deployment_mismatch"
+    });
+    const stale = await review(1, "deployment_r1", "customer_confirmed", "draft", "冲突");
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toMatchObject({
+      error: "review_status_conflict",
+      currentStatus: "review_requested"
+    });
+    expect(
+      (await review(1, "deployment_r1", "customer_feedback", "review_requested", "请修改标题")).status
+    ).toBe(201);
+
+    const revision2 = await app.request("/sites/review-site/revisions", {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: 1, config })
+    });
+    expect(revision2.status).toBe(201);
+    await expect(revision2.json()).resolves.toMatchObject({ revision: 2, contentStatus: "draft" });
+    await addHealthyDeployment(2, "r2");
+    expect((await review(2, "deployment_r2", "preview_sent", "draft", "发送修改稿")).status).toBe(201);
+    expect(
+      (await review(2, "deployment_r2", "customer_confirmed", "review_requested", "客户确认")).status
+    ).toBe(201);
+    expect((await repository.getRevision("review-site", 2))?.contentStatus).toBe("approved");
+
+    const archive = await app.request("/sites/review-site/revisions/1/archive", {
+      method: "POST",
+      body: JSON.stringify({ expectedStatus: "draft" })
+    });
+    expect(archive.status).toBe(200);
+    await expect(archive.json()).resolves.toMatchObject({ revision: 1, contentStatus: "archived" });
+
+    const reviews = await (await app.request("/sites/review-site/reviews")).json();
+    expect(reviews).toHaveLength(4);
+    expect(reviews.map((item: { kind: string }) => item.kind)).toEqual([
+      "preview_sent",
+      "customer_feedback",
+      "preview_sent",
+      "customer_confirmed"
+    ]);
+    const audits = await (await app.request("/sites/review-site/audit-logs")).json();
+    expect(audits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "review.created" }),
+        expect.objectContaining({ action: "revision.status.approved" }),
+        expect.objectContaining({ action: "revision.archived" })
+      ])
+    );
+  });
+
   it("returns stable client errors for malformed JSON and duplicate sites", async () => {
     const app = createApp(new InMemorySiteRepository(), { actorId: "trusted-operator" });
     const malformed = await app.request("/sites", { method: "POST", body: "{" });

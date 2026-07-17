@@ -275,4 +275,78 @@ describe("Phase 2 admin interactions", () => {
     expect(await screen.findByText(/attempt 1\/3/)).toBeTruthy();
     expect(await screen.findByText(/retry_scheduled/)).toBeTruthy();
   });
+
+  it("records preview sending and customer confirmation in the review timeline", async () => {
+    let contentStatus = "draft";
+    const reviews: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/sites") && (!init?.method || init.method === "GET")) {
+        return jsonResponse([{
+          siteId: "jinyuan-20260524",
+          name: "杭州金源电器",
+          template: "b2b-manufacturing-v1",
+          currentRevision: 1
+        }]);
+      }
+      if (url.endsWith("/revisions")) {
+        return jsonResponse([{
+          siteId: "jinyuan-20260524",
+          revision: 1,
+          schemaVersion: "1.0",
+          config: initialConfig,
+          contentStatus,
+          createdBy: "operator",
+          createdAt: "2026-07-17T08:00:00.000Z"
+        }]);
+      }
+      if (url.endsWith("/assets") || url.endsWith("/artifacts")) return jsonResponse([]);
+      if (url.endsWith("/preview-state")) return jsonResponse({ error: "preview_state_not_found" }, 404);
+      if (url.endsWith("/reviews") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        const outcome = body.kind === "preview_sent" ? "pending" : "approved";
+        contentStatus = body.kind === "preview_sent" ? "review_requested" : "approved";
+        const record = {
+          reviewId: `review_${reviews.length + 1}`,
+          revision: 1,
+          deploymentId: body.deploymentId,
+          kind: body.kind,
+          outcome,
+          channel: body.channel,
+          previewUrl: "https://preview.test",
+          note: body.note,
+          recordedBy: "operator",
+          recordedAt: `2026-07-17T08:0${reviews.length + 1}:00.000Z`
+        };
+        reviews.push(record);
+        return jsonResponse({ kind: "created", record, revision: { contentStatus } }, 201);
+      }
+      if (url.endsWith("/reviews")) return jsonResponse(reviews);
+      if (url.endsWith("/deployments") && init?.method === "POST") {
+        return jsonResponse({
+          deploymentId: "deployment_review",
+          jobId: "job_review",
+          revision: 1,
+          status: "healthy",
+          placeholderAssetIds: [],
+          previewUrl: "https://preview.test"
+        }, 202);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="http://api.test" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /杭州金源电器/ }));
+    await userEvent.click(screen.getByRole("button", { name: "创建预览" }));
+    await userEvent.type(screen.getByLabelText("审核备注"), "微信发送首稿");
+    await userEvent.click(screen.getByRole("button", { name: "记录预览已发送" }));
+    expect(await screen.findByText(/preview_sent.*微信发送首稿/)).toBeTruthy();
+    expect(screen.getByText(/内容状态：review_requested/)).toBeTruthy();
+
+    await userEvent.type(screen.getByLabelText("审核备注"), "客户确认通过");
+    await userEvent.click(screen.getByRole("button", { name: "记录客户确认" }));
+    expect(await screen.findByText(/customer_confirmed.*客户确认通过/)).toBeTruthy();
+    expect(screen.getByText(/内容状态：approved/)).toBeTruthy();
+  });
 });

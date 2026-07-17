@@ -8,6 +8,7 @@
   },
   "scripts": {
     "acceptance:local": "pnpm --filter @zhansite/api acceptance:local",
+    "acceptance:operations": "pnpm --filter @zhansite/api acceptance:operations",
     "acceptance:reliability": "pnpm --filter @zhansite/api acceptance:reliability",
     "build": "pnpm -r build",
     "check": "pnpm -r typecheck && pnpm -r test",

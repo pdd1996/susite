@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import mysql from "mysql2/promise";
 import { and, asc, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
@@ -9,6 +10,7 @@ import {
   buildArtifacts,
   deploymentEvents,
   deployments,
+  reviewRecords,
   sitePreviewStates,
   siteRevisions,
   sites
@@ -20,6 +22,10 @@ import {
   type BuildArtifact,
   type Deployment,
   type DeploymentEvent,
+  type ReviewChannel,
+  type ReviewKind,
+  type ReviewOutcome,
+  type ReviewRecord,
   type SitePreviewState,
   type Site,
   type SiteRepository,
@@ -53,6 +59,11 @@ const asRevision = (row: typeof siteRevisions.$inferSelect): SiteRevision => ({
     "site_revisions.schema_version"
   ),
   config: row.config as SiteConfig,
+  contentStatus: expectDatabaseValue(
+    row.contentStatus,
+    ["draft", "review_requested", "approved", "archived"] as const,
+    "site_revisions.content_status"
+  ),
   createdBy: row.createdBy,
   createdAt: row.createdAt.toISOString()
 });
@@ -166,6 +177,32 @@ const asDeploymentEvent = (row: typeof deploymentEvents.$inferSelect): Deploymen
   createdAt: row.createdAt.toISOString()
 });
 
+const asReviewRecord = (row: typeof reviewRecords.$inferSelect): ReviewRecord => ({
+  reviewId: row.reviewId,
+  siteId: row.siteId,
+  revision: row.revision,
+  deploymentId: row.deploymentId,
+  kind: expectDatabaseValue(
+    row.kind,
+    ["preview_sent", "customer_feedback", "customer_confirmed"] as const,
+    "review_records.kind"
+  ),
+  outcome: expectDatabaseValue(
+    row.outcome,
+    ["pending", "changes_requested", "approved"] as const,
+    "review_records.outcome"
+  ),
+  channel: expectDatabaseValue(
+    row.channel,
+    ["wechat", "phone", "email", "in_person", "other"] as const,
+    "review_records.channel"
+  ),
+  previewUrl: row.previewUrl,
+  note: row.note,
+  recordedBy: row.recordedBy,
+  recordedAt: row.recordedAt.toISOString()
+});
+
 const mysqlErrorCode = (error: unknown): string | undefined => {
   let current = error;
   for (let depth = 0; depth < 5; depth += 1) {
@@ -198,6 +235,7 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
         revision: 1,
         schemaVersion: "1.0",
         config: initialConfig,
+        contentStatus: "draft",
         createdBy: actorId,
         createdAt: new Date().toISOString()
       };
@@ -209,6 +247,7 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
             revision: 1,
             schemaVersion: "1.0",
             config: initialConfig,
+            contentStatus: "draft",
             createdBy: actorId
           });
           await tx.insert(auditLogs).values({
@@ -272,6 +311,7 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           revision: expectedRevision + 1,
           schemaVersion: "1.0",
           config,
+          contentStatus: "draft",
           createdBy: actorId,
           createdAt: new Date().toISOString()
         };
@@ -280,6 +320,7 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
           revision: revision.revision,
           schemaVersion: revision.schemaVersion,
           config,
+          contentStatus: "draft",
           createdBy: actorId
         });
         const [updateResult] = await tx
@@ -297,6 +338,185 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
         });
         return { kind: "created" as const, revision };
       });
+    },
+
+    async archiveRevision(siteId, revisionNumber, expectedStatus, actorId) {
+      return db.transaction(async (tx) => {
+        const [site] = await tx.select().from(sites).where(eq(sites.siteId, siteId)).for("update");
+        if (!site) return { kind: "site_not_found" as const };
+        const [row] = await tx
+          .select()
+          .from(siteRevisions)
+          .where(
+            and(
+              eq(siteRevisions.siteId, siteId),
+              eq(siteRevisions.revision, revisionNumber)
+            )
+          )
+          .for("update");
+        if (!row) return { kind: "revision_not_found" as const };
+        const revision = asRevision(row);
+        if (site.currentRevision === revisionNumber) return { kind: "current_revision" as const };
+        if (revision.contentStatus !== expectedStatus) {
+          return { kind: "status_conflict" as const, currentStatus: revision.contentStatus };
+        }
+        if (revision.contentStatus === "archived") return { kind: "transition_invalid" as const };
+        const [updated] = await tx
+          .update(siteRevisions)
+          .set({ contentStatus: "archived" })
+          .where(
+            and(
+              eq(siteRevisions.siteId, siteId),
+              eq(siteRevisions.revision, revisionNumber),
+              eq(siteRevisions.contentStatus, expectedStatus)
+            )
+          );
+        if (updated.affectedRows !== 1) {
+          return { kind: "status_conflict" as const, currentStatus: revision.contentStatus };
+        }
+        await tx.insert(auditLogs).values({
+          actorId,
+          action: "revision.archived",
+          siteId,
+          targetId: `${siteId}:${revisionNumber}`
+        });
+        return {
+          kind: "updated" as const,
+          revision: { ...revision, contentStatus: "archived" as const }
+        };
+      });
+    },
+
+    async createReviewRecord(input) {
+      return db.transaction(async (tx) => {
+        const [site] = await tx
+          .select({ siteId: sites.siteId })
+          .from(sites)
+          .where(eq(sites.siteId, input.siteId));
+        if (!site) return { kind: "site_not_found" as const };
+        const [revisionRow] = await tx
+          .select()
+          .from(siteRevisions)
+          .where(
+            and(
+              eq(siteRevisions.siteId, input.siteId),
+              eq(siteRevisions.revision, input.revision)
+            )
+          )
+          .for("update");
+        if (!revisionRow) return { kind: "revision_not_found" as const };
+        const revision = asRevision(revisionRow);
+        const [deployment] = await tx
+          .select()
+          .from(deployments)
+          .where(
+            and(
+              eq(deployments.deploymentId, input.deploymentId),
+              eq(deployments.siteId, input.siteId),
+              eq(deployments.revision, input.revision),
+              eq(deployments.status, "healthy")
+            )
+          );
+        if (!deployment?.previewUrl) return { kind: "deployment_not_found" as const };
+        if (revision.contentStatus !== input.expectedStatus) {
+          return { kind: "status_conflict" as const, currentStatus: revision.contentStatus };
+        }
+        const transitions: Record<
+          ReviewKind,
+          { from: typeof revision.contentStatus; to: typeof revision.contentStatus; outcome: ReviewOutcome }
+        > = {
+          preview_sent: { from: "draft", to: "review_requested", outcome: "pending" },
+          customer_feedback: {
+            from: "review_requested",
+            to: "draft",
+            outcome: "changes_requested"
+          },
+          customer_confirmed: {
+            from: "review_requested",
+            to: "approved",
+            outcome: "approved"
+          }
+        };
+        const transition = transitions[input.kind];
+        if (revision.contentStatus !== transition.from) return { kind: "transition_invalid" as const };
+        if (input.kind !== "preview_sent") {
+          const [sentRecord] = await tx
+            .select({ deploymentId: reviewRecords.deploymentId })
+            .from(reviewRecords)
+            .where(
+              and(
+                eq(reviewRecords.siteId, input.siteId),
+                eq(reviewRecords.revision, input.revision),
+                eq(reviewRecords.kind, "preview_sent")
+              )
+            )
+            .orderBy(desc(reviewRecords.recordedAt), desc(reviewRecords.reviewId))
+            .limit(1);
+          if (!sentRecord || sentRecord.deploymentId !== input.deploymentId) {
+            return { kind: "review_deployment_mismatch" as const };
+          }
+        }
+        const recordedAt = new Date();
+        const record: ReviewRecord = {
+          reviewId: `review_${randomUUID()}`,
+          siteId: input.siteId,
+          revision: input.revision,
+          deploymentId: input.deploymentId,
+          kind: input.kind,
+          outcome: transition.outcome,
+          channel: input.channel as ReviewChannel,
+          previewUrl: deployment.previewUrl,
+          note: input.note,
+          recordedBy: input.actorId,
+          recordedAt: recordedAt.toISOString()
+        };
+        await tx.insert(reviewRecords).values({ ...record, recordedAt });
+        const [updated] = await tx
+          .update(siteRevisions)
+          .set({ contentStatus: transition.to })
+          .where(
+            and(
+              eq(siteRevisions.siteId, input.siteId),
+              eq(siteRevisions.revision, input.revision),
+              eq(siteRevisions.contentStatus, input.expectedStatus)
+            )
+          );
+        if (updated.affectedRows !== 1) {
+          throw new Error("review_status_update_conflict");
+        }
+        await tx.insert(auditLogs).values([
+          {
+            actorId: input.actorId,
+            action: "review.created",
+            siteId: input.siteId,
+            targetId: record.reviewId
+          },
+          {
+            actorId: input.actorId,
+            action: `revision.status.${transition.to}`,
+            siteId: input.siteId,
+            targetId: `${input.siteId}:${input.revision}`
+          }
+        ]);
+        return {
+          kind: "created" as const,
+          record,
+          revision: { ...revision, contentStatus: transition.to }
+        };
+      });
+    },
+
+    async listReviewRecords(siteId, revision) {
+      const where = revision === undefined
+        ? eq(reviewRecords.siteId, siteId)
+        : and(eq(reviewRecords.siteId, siteId), eq(reviewRecords.revision, revision));
+      return (
+        await db
+          .select()
+          .from(reviewRecords)
+          .where(where)
+          .orderBy(asc(reviewRecords.recordedAt), asc(reviewRecords.reviewId))
+      ).map(asReviewRecord);
     },
 
     async createAsset(asset) {
@@ -564,56 +784,67 @@ export function createMySqlRepository(databaseUrl: string): SiteRepository {
     },
 
     async claimNextDeployment(leaseExpiresAt) {
-      return db.transaction(async (tx) => {
-        const now = new Date();
-        const [deployment] = await tx
-          .select()
-          .from(deployments)
-          .where(
-            or(
-              eq(deployments.status, "queued"),
-              and(
-                eq(deployments.status, "retry_waiting"),
-                or(isNull(deployments.nextAttemptAt), lt(deployments.nextAttemptAt, now)),
-                lt(deployments.attemptCount, deployments.maxAttempts)
-              ),
-              and(
-                inArray(deployments.status, ["building", "deploying"]),
-                or(isNull(deployments.leaseExpiresAt), lt(deployments.leaseExpiresAt, now)),
-                lt(deployments.attemptCount, deployments.maxAttempts)
+      let lastContention: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          return await db.transaction(async (tx) => {
+          const now = new Date();
+          const [deployment] = await tx
+            .select()
+            .from(deployments)
+            .where(
+              or(
+                eq(deployments.status, "queued"),
+                and(
+                  eq(deployments.status, "retry_waiting"),
+                  or(isNull(deployments.nextAttemptAt), lt(deployments.nextAttemptAt, now)),
+                  lt(deployments.attemptCount, deployments.maxAttempts)
+                ),
+                and(
+                  inArray(deployments.status, ["building", "deploying"]),
+                  or(isNull(deployments.leaseExpiresAt), lt(deployments.leaseExpiresAt, now)),
+                  lt(deployments.attemptCount, deployments.maxAttempts)
+                )
               )
             )
-          )
-          .orderBy(deployments.createdAt)
-          .limit(1)
-          .for("update");
-        if (!deployment) return undefined;
-        const nextLeaseToken = deployment.leaseToken + 1;
-        const [claimResult] = await tx
-          .update(deployments)
-          .set({
+            .orderBy(deployments.createdAt)
+            .limit(1)
+            .for("update");
+          if (!deployment) return undefined;
+          const nextLeaseToken = deployment.leaseToken + 1;
+          const [claimResult] = await tx
+            .update(deployments)
+            .set({
+              status: "building",
+              leaseExpiresAt: new Date(leaseExpiresAt),
+              leaseToken: nextLeaseToken,
+              attemptCount: deployment.attemptCount + 1,
+              nextAttemptAt: null
+            })
+            .where(
+              and(
+                eq(deployments.jobId, deployment.jobId),
+                eq(deployments.leaseToken, deployment.leaseToken)
+              )
+            );
+          if (claimResult.affectedRows !== 1) return undefined;
+          return asDeployment({
+            ...deployment,
             status: "building",
             leaseExpiresAt: new Date(leaseExpiresAt),
             leaseToken: nextLeaseToken,
             attemptCount: deployment.attemptCount + 1,
             nextAttemptAt: null
-          })
-          .where(
-            and(
-              eq(deployments.jobId, deployment.jobId),
-              eq(deployments.leaseToken, deployment.leaseToken)
-            )
-          );
-        if (claimResult.affectedRows !== 1) return undefined;
-        return asDeployment({
-          ...deployment,
-          status: "building",
-          leaseExpiresAt: new Date(leaseExpiresAt),
-          leaseToken: nextLeaseToken,
-          attemptCount: deployment.attemptCount + 1,
-          nextAttemptAt: null
-        });
-      });
+          });
+          });
+        } catch (error) {
+          const code = mysqlErrorCode(error);
+          if (code !== "ER_LOCK_DEADLOCK" && code !== "ER_LOCK_WAIT_TIMEOUT") throw error;
+          lastContention = error;
+          if (attempt < 2) await delay((attempt + 1) * 10);
+        }
+      }
+      throw lastContention;
     },
 
     async updateDeployment(siteId, jobId, leaseToken, patch) {
