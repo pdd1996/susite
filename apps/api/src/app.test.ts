@@ -545,4 +545,25 @@ describe("Phase 1 site API", () => {
       verifyPreviewHealth("https://site.preview.example.test", failedFetch)
     ).rejects.toThrow("health_check_failed:resource");
   });
+
+  it("rejects upload signing when the deployment disables non-persistent uploads", async () => {
+    const app = createApp(new InMemorySiteRepository(), {
+      actorId: "trusted-operator",
+      uploadsEnabled: false
+    });
+
+    const response = await app.request("/sites/any-site/upload/sign", {
+      method: "POST",
+      body: JSON.stringify({
+        type: "logo",
+        contentType: "image/png",
+        sizeBytes: 1,
+        originalFilename: "logo.png",
+        sourceKind: "customer_provided"
+      })
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: "uploads_disabled" });
+  });
 });

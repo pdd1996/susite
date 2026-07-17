@@ -24,6 +24,7 @@ import { UploadService, UploadValidationError } from "./upload-service.js";
 type AppOptions = {
   actorId: string;
   allowedOrigin?: string;
+  uploadsEnabled?: boolean;
   objectStorage?: ObjectStorage;
   uploadService?: UploadService;
   deploymentService?: DeploymentService;
@@ -228,6 +229,9 @@ export function createApp(repository: SiteRepository, options: AppOptions) {
     sourceKind: z.enum(["customer_provided", "placeholder"])
   });
   app.post("/sites/:siteId/upload/sign", async (context) => {
+    if (options.uploadsEnabled === false) {
+      return context.json({ error: "uploads_disabled" }, 503);
+    }
     const siteId = context.req.param("siteId");
     if (!(await repository.getSite(siteId))) return context.json({ error: "site_not_found" }, 404);
     const parsed = signUploadSchema.safeParse(await context.req.json());

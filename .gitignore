@@ -24,6 +24,7 @@ temp/
 # Deployment and tool caches
 .turbo/
 .vercel/
+deploy/secrets/
 
 # Editor and operating-system files
 .idea/

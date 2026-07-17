@@ -85,6 +85,17 @@ describe("Phase 2 admin interactions", () => {
     expect(window.confirm).toHaveBeenCalled();
   });
 
+  it("hides uploads when persistent storage is disabled", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse([])));
+
+    render(<App apiBaseUrl="http://api.test" uploadsEnabled={false} />);
+
+    expect(
+      await screen.findByText("当前 IP 基线未启用持久化素材存储，素材上传已禁用。")
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "上传并复核" })).toBeNull();
+  });
+
   it("loads a historical revision and shows deployment placeholder warnings", async () => {
     const olderConfig = {
       ...initialConfig,

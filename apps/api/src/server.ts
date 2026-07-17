@@ -27,6 +27,7 @@ const deploymentService = new DeploymentService(repository, publisher);
 const app = createApp(repository, {
   actorId,
   allowedOrigin: process.env.ADMIN_ORIGIN,
+  uploadsEnabled: process.env.UPLOADS_ENABLED !== "false",
   objectStorage,
   uploadService,
   deploymentService

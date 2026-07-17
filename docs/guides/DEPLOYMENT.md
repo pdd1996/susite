@@ -17,6 +17,14 @@
 | 云端 20 次部署 P95 | 阻塞/待确认 | 本地 P95 不替代云端数据 |
 | 公网微信真机 | 阻塞/待确认 | 模板测试已覆盖拨号/PDF 链接，尚无公网真机记录 |
 
+## 无域名 IP 基线
+
+仓库提供 `deploy/compose.ip-baseline.yml`，用于在 Ubuntu 24.04 单机上先运行 MySQL、migration、API 与管理后台。当前示例公网入口是 `http://118.196.82.13`；只有 Nginx 映射宿主机 80 端口，API 与 MySQL 保持在容器网络内，Nginx 对后台和 `/api` 统一启用 Basic Auth。
+
+该环境明确关闭发布 Worker，并且不配置 OSS、平台域名或 release 健康检查入口。Compose 将 `UPLOADS_ENABLED` 与 `VITE_UPLOADS_ENABLED` 设为 `false`：API 拒绝签发上传，管理后台不显示上传控件，避免 MySQL 保存元数据而 API 进程内对象存储在重启后丢失文件。因此它只验证管理与数据库元数据持久化基线，不产生公网静态预览，不能用于 AC-08 公网真机、云端 20 次部署或正式交付验收。当前 API 仍使用受信任的单一 `DEV_ACTOR_ID`，服务端会拒绝 `NODE_ENV=production`；Basic Auth 只是无域名阶段的临时外围保护，不能替代 IDaaS。由于 HTTP 不加密，不得在该环境录入密码、商业机密或真实客户敏感素材。
+
+服务器初始化、凭据生成、部署、停止和数据保留命令以 `deploy/README.md` 为准。火山引擎安全组只开放 TCP 22/80，不开放 MySQL 3306 和 API 8787。启用域名、HTTPS、OSS 或真实预览时必须另行评审，不能在此基线上直接宣称生产化。
+
 ## OSS
 
 使用独立测试 bucket，并通过 RAM 账号授予最小权限：

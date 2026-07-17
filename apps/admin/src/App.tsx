@@ -3,6 +3,7 @@ import type { SiteConfig } from "@zhansite/site-config";
 import { parseConfigJson } from "./config-json.js";
 
 const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
+const defaultUploadsEnabled = import.meta.env.VITE_UPLOADS_ENABLED !== "false";
 
 export const initialConfig: SiteConfig = {
   brand: { name: "杭州金源电器有限公司", primaryColor: "#C41E3A", logoAssetId: "asset_logo_01" },
@@ -126,7 +127,13 @@ const putWithProgress = (
     request.send(file);
   });
 
-export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string }) {
+export function App({
+  apiBaseUrl = defaultApiBaseUrl,
+  uploadsEnabled = defaultUploadsEnabled
+}: {
+  apiBaseUrl?: string;
+  uploadsEnabled?: boolean;
+}) {
   const initialText = useMemo(() => JSON.stringify(initialConfig, null, 2), []);
   const [sites, setSites] = useState<Site[]>([]);
   const [siteId, setSiteId] = useState("jinyuan-20260524");
@@ -316,6 +323,9 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
   };
 
   const uploadAsset = async () => {
+    if (!uploadsEnabled) {
+      return setMessage("当前 IP 基线未启用持久化素材存储，不能上传素材。");
+    }
     if (!uploadFile) return setMessage("请先选择文件。");
     const signResponse = await request(`/sites/${siteId}/upload/sign`, {
       method: "POST",
@@ -533,26 +543,32 @@ export function App({ apiBaseUrl = defaultApiBaseUrl }: { apiBaseUrl?: string })
       </ol>
 
       <h2>素材上传</h2>
-      <label>
-        素材类型
-        <select value={assetType} onChange={(event) => setAssetType(event.target.value)}>
-          {assetTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select>
-      </label>
-      <label>
-        来源
-        <select
-          value={sourceKind}
-          onChange={(event) => setSourceKind(event.target.value as typeof sourceKind)}
-        >
-          <option value="customer_provided">客户提供</option>
-          <option value="placeholder">占位素材</option>
-        </select>
-      </label>
-      {sourceKind === "placeholder" ? <p>批准人将由服务端已认证的运营身份记录。</p> : null}
-      <input aria-label="选择素材文件" type="file" onChange={(event) => setUploadFile(event.target.files?.[0])} />
-      <button onClick={() => void uploadAsset()}>上传并复核</button>
-      {uploadProgress !== undefined ? <progress aria-label="上传进度" max={100} value={uploadProgress} /> : null}
+      {!uploadsEnabled ? (
+        <p role="status">当前 IP 基线未启用持久化素材存储，素材上传已禁用。</p>
+      ) : (
+        <>
+          <label>
+            素材类型
+            <select value={assetType} onChange={(event) => setAssetType(event.target.value)}>
+              {assetTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
+          <label>
+            来源
+            <select
+              value={sourceKind}
+              onChange={(event) => setSourceKind(event.target.value as typeof sourceKind)}
+            >
+              <option value="customer_provided">客户提供</option>
+              <option value="placeholder">占位素材</option>
+            </select>
+          </label>
+          {sourceKind === "placeholder" ? <p>批准人将由服务端已认证的运营身份记录。</p> : null}
+          <input aria-label="选择素材文件" type="file" onChange={(event) => setUploadFile(event.target.files?.[0])} />
+          <button onClick={() => void uploadAsset()}>上传并复核</button>
+          {uploadProgress !== undefined ? <progress aria-label="上传进度" max={100} value={uploadProgress} /> : null}
+        </>
+      )}
       <ul>
         {assets.map((asset) => (
           <li key={asset.assetId}>

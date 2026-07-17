@@ -1,0 +1,85 @@
+name: zhansite-ip-baseline
+
+x-api-image: &api-image
+  image: zhansite-api:ip-baseline
+  build:
+    context: ..
+    dockerfile: deploy/api.Dockerfile
+
+x-api-environment: &api-environment
+  DATABASE_URL: mysql://zhansite:${DB_PASSWORD:?set DB_PASSWORD}@db:3306/zhansite
+  DEV_ACTOR_ID: ${DEV_ACTOR_ID:-server-operator}
+  ADMIN_ORIGIN: ${ADMIN_ORIGIN:-http://118.196.82.13}
+  RUN_EMBEDDED_DEPLOYMENT_WORKER: "false"
+  UPLOADS_ENABLED: "false"
+  UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET:?set UPLOAD_TOKEN_SECRET}
+  PORT: "8787"
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_DATABASE: zhansite
+      MYSQL_USER: zhansite
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      TZ: UTC
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  migrate:
+    <<: *api-image
+    restart: "no"
+    command: ["pnpm", "--filter", "@zhansite/api", "db:migrate"]
+    environment: *api-environment
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *api-image
+    restart: unless-stopped
+    environment: *api-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8787/sites').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  gateway:
+    image: zhansite-admin:ip-baseline
+    build:
+      context: ..
+      dockerfile: deploy/admin.Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+        VITE_UPLOADS_ENABLED: "false"
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./secrets/.htpasswd:/etc/nginx/auth/.htpasswd:ro
+
+volumes:
+  mysql-data:
